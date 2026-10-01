@@ -770,26 +770,22 @@ WS 帧 → MF H.264 解码器 MFT → NV12（系统内存，含跨距）
   `tools\run_mft_replay_probe.cmd`（12 种解码驱动方式对比）。
 
 
-#### 第二轮真机（2026-10-01 14:07）：0 帧 —— 根因是**编码边界没对齐 16**（细节见 docs 历史）
+#### 第二轮真机（14:07）：0 帧 —— 根因是**编码边界没对齐 16**（细节见 docs 历史）
 
-`解码器可用输出类型` 只有默认 `1920x1080` + `已发布 0` + `流格式变化 0 次`。
-对照同一天**成功出帧**的会话（下发 `1280x720` / `992x560`，都 16 对齐）与失败那次
-（`1280x575`）⇒ **非 16 对齐尺寸会让容器编码器产出 MF 解不出来的码流**（网页端不发 `bounds` 所以没事）。
+`解码器可用输出类型` 只有默认 `1920x1080` + `已发布 0` + `流格式变化 0 次`；对照成功那轮
+（`1280x720` / `992x560`，都 16 对齐）⇒ **非 16 对齐尺寸会让容器编码器产出 MF 解不出来的码流**。
 修法：`clampBoundsToNative` 收敛后**向下对齐到 16**（`1898x853 → 1280x560`），绝不上抬。
 （顺序修正只是 67 vs 64 的**正确性改进**，不是那次 0 帧的根因。）
 
 
-#### 真机第三次（2026-10-01 14:13）：GPU 共享纹理路**全黑** → 默认关闭（细节见 docs 历史）
+#### 真机第三次（14:13）：GPU 共享纹理路**全黑** → 默认关闭（细节见 docs 历史）
 
-现象：`已解码 67 / 已发布 67 / 丢弃 0 / 光栅回调 154`，但屏幕**全黑**。
-机制（已实测，`tools\run_d3d11_adapter_probe.cmd` 打印打开矩阵）：
-本机有 **NVIDIA + Intel + Basic Render** 三块适配器，我们的 D3D11 设备建在 NVIDIA 上，
-而引擎 ANGLE 多半在 Intel；**传统 DXGI 共享句柄不能跨适配器打开**（实测同适配器 3/3 OK、
-跨适配器 **0/6**）⇒ 引擎拿不到纹理 ⇒ `Could not create external texture` ⇒ 黑屏。
-**处置**：`WS_SCRCPY_GPU` 默认 **false**（走 CPU 像素缓冲路），要看 GPU 路显式 `WS_SCRCPY_GPU=1`，
-并用 `WS_SCRCPY_GPU_ADAPTER=intel|nvidia|<索引>` 选与引擎同一块适配器；
-引擎自己的报错写在 exe 同目录 `engine_stderr.log`（`main.cpp` 的重定向，见 §12.2 末尾）。
-**教训：`已发布 N 帧` ≠ 上屏成功，日志全绿也可能是黑屏。**
+`已解码 67 / 已发布 67 / 光栅回调 154` 但屏幕全黑。机制（`run_d3d11_adapter_probe.cmd` 实测）：
+本机有 NVIDIA + Intel + Basic Render，我们的设备在 NVIDIA、引擎 ANGLE 多半在 Intel，而
+**传统 DXGI 共享句柄不能跨适配器打开**（同适配器 3/3 OK、跨适配器 **0/6**）⇒ 引擎拿不到纹理。
+**处置**：`WS_SCRCPY_GPU` 默认 **false**，要试显式 `WS_SCRCPY_GPU=1` + `WS_SCRCPY_GPU_ADAPTER=`。
+**教训：`已发布 N 帧` ≠ 上屏成功。**
+
 
 
 #### ★ 真机第四次（2026-10-01 下午）：全黑 + 周期性卡几秒的真正根因（结论见 §1.2）
@@ -873,4 +869,17 @@ VideoToolbox 不需要额外 entitlement，但 **Debug 与 Release 两个 entitl
 
 **验收**：① 首帧立刻出（不是 1~3 秒后）；② 画面静止时不黑、不隔几秒跳一下；
 ③ `screencapture` 截到的图里确实有设备画面。
+
+---
+
+## 14. CI 与应用图标
+
+- **CI（Forgejo Actions）**：`.forgejo/workflows/build.yml` 三个 job ——
+  `verify`（analyze + test）/ `windows`（zip）/ `android`（APK）。
+  **硬约束：Windows 桌面产物只能在 Windows 上构建**，所以用一台 Windows 自托管 runner
+  同时跑两端（`runs-on: windows` ↔ runner 标签 `windows:host`）。注册、工具链、排错见 **`docs/ci.md`**。
+  Windows 依赖那一步在 CI 上用 `tools\prepare_windows_deps.ps1 -Online`（干净机器没有本机 NuGet 缓存）。
+- **图标**：`python tools/make_icons.py` 一次生成 Windows(.ico)/Android(含自适应)/macOS/iOS/Web，
+  母版 `assets/icon/app_icon_1024.png`；换配色只改脚本顶部的 `GRAD_*` 常量。
+  **改完必须看图确认**（第一版把"缝隙"写成了实心矩形，整个图形被擦掉，是看图才发现的）。
 

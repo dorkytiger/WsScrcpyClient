@@ -61,6 +61,7 @@ app.*.map.json
 # 各平台的 build 中间产物（Flutter 默认模板没有列全，macOS/Linux 上尤其容易误提交）
 /android/build/
 /android/.gradle/
+/android/.kotlin/
 /android/local.properties
 /android/app/.cxx/
 /ios/build/
@@ -97,4 +98,7 @@ engine_stderr.log
 # 原生自测/探针留下的零字节或临时产物
 /RGB
 /RGBA
+
+# 本机与 CI 的发行产物（tools\build_release.cmd / .forgejo 工作流写这里）
+/dist/
 

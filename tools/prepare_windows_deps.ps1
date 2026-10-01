@@ -29,7 +29,15 @@ param(
     [string]$RepoRoot,
 
     # nuget.exe 的完整路径或所在目录；默认自动查找。
-    [string]$NuGetPath
+    [string]$NuGetPath,
+
+    # 本机 NuGet 缓存里没有该包时，是否**从 nuget.org 下载** .nupkg 到 .tmp\nuget-source\。
+    #
+    # 默认关：作者机/沙箱里我们希望"完全离线、只写工作区"，缺包就报错并给出补包办法。
+    # CI（Forgejo Actions 的全新 Windows runner）没有本机 NuGet 缓存，必须打开它。
+    # 注意：只要两个 .nupkg 落到了 .tmp\nuget-source\，构建期的 tools\nuget_shim.cmd
+    # 就会自己解包到 build\windows\x64\packages，**不再需要 nuget.exe**。
+    [switch]$Online
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,6 +112,14 @@ foreach ($package in $packageList) {
     }
     $cached = Get-CachedPackagePath -Id $package.Id -Version $package.Version
     if (-not (Test-Path -LiteralPath $cached)) {
+        if ($Online) {
+            # nuget.org 的 flat 下载端点，返回的就是 .nupkg（官方支持的用法）。
+            $uri = "https://www.nuget.org/api/v2/package/$($package.Id)/$($package.Version)"
+            Write-Host "    本机缓存没有，改从 nuget.org 下载：$uri"
+            Invoke-WebRequest -Uri $uri -OutFile $target -UseBasicParsing
+            Write-Host "    已下载：$target"
+            continue
+        }
         throw @"
 本机 NuGet 缓存里没有 $($package.Id) $($package.Version)：
     期望路径：$cached
@@ -111,6 +127,7 @@ foreach ($package in $packageList) {
     1) nuget install $($package.Id) -Version $($package.Version) -ExcludeVersion -OutputDirectory build\windows\x64\packages
     2) 手动下载 https://www.nuget.org/api/v2/package/$($package.Id)/$($package.Version)
        另存为 $target
+    3) 加 -Online 让本脚本自己下载（CI 用；作者机默认离线，见 .SYNOPSIS）
 "@
     }
     Copy-Item -LiteralPath $cached -Destination $target -Force
@@ -140,18 +157,34 @@ Write-Host "    已写入：$configPath"
 
 Write-Step '准备 nuget.exe（复制到 build\windows\x64\，避免 CMake 联网下载）'
 $nuget = Resolve-NuGetExe -Explicit $NuGetPath -Root $repo
+$packagesExpanded = $false
 if (-not $nuget) {
-    throw '未找到 nuget.exe：请把它放到 C:\Users\Warren\Dev\nuget\，或用 -NuGetPath 指定'
-}
-Write-Host "    使用：$nuget"
-$buildNuget = Join-Path $repo 'build\windows\x64\nuget.exe'
-if (-not (Test-Path -LiteralPath $buildNuget)) {
-    Copy-Item -LiteralPath $nuget -Destination $buildNuget -Force
-    Write-Host "    已复制到：$buildNuget"
+    # 没有 nuget.exe 也未必失败：只要两个 .nupkg 已经在 .tmp\nuget-source\，
+    # 构建时 tools\nuget_shim.cmd 会自己解包（CI 就走这条，见 -Online 的说明）。
+    $allOffline = $true
+    foreach ($package in $packageList) {
+        $target = Join-Path $sourceDir "$($package.Id).$($package.Version).nupkg"
+        if (-not (Test-Path -LiteralPath $target)) { $allOffline = $false }
+    }
+    if ($allOffline) {
+        Write-Host '    未找到 nuget.exe，但两个 .nupkg 已在 .tmp\nuget-source\：'
+        Write-Host '    构建期的 tools\nuget_shim.cmd 会自己解包，跳过 nuget 安装步骤。'
+        $packagesExpanded = $true
+    } else {
+        throw '未找到 nuget.exe，且 .tmp\nuget-source\ 里也没有离线包：请用 -NuGetPath 指定 nuget.exe，或加 -Online 让本脚本下载包'
+    }
 } else {
-    Write-Host "    已存在：$buildNuget"
+    Write-Host "    使用：$nuget"
+    $buildNuget = Join-Path $repo 'build\windows\x64\nuget.exe'
+    if (-not (Test-Path -LiteralPath $buildNuget)) {
+        Copy-Item -LiteralPath $nuget -Destination $buildNuget -Force
+        Write-Host "    已复制到：$buildNuget"
+    } else {
+        Write-Host "    已存在：$buildNuget"
+    }
 }
 
+if (-not $packagesExpanded) {
 Write-Step '安装依赖包到 build\windows\x64\packages'
 # nuget.exe 5.10 的临时锁固定落在进程的 %TEMP%\NuGetScratch（NUGET_SCRATCH 对它无效），
 # 受限环境里 %TEMP% 不可写会直接失败；这里临时把 TEMP/TMP 指到工作区，退出前还原。
@@ -189,7 +222,13 @@ foreach ($file in $expected) {
     }
     Write-Host "    OK：$file"
 }
+} else {
+    Write-Step '跳过 nuget 安装与预校验（构建期由 tools\nuget_shim.cmd 解包）'
+}
 
 Write-Host ''
 Write-Host '准备完成，现在可以直接构建（不需要把 nuget 放进 PATH）：'
 Write-Host '    flutter build windows --debug'
+if ($packagesExpanded) {
+    Write-Host '    注意：本次没有预装到 build\windows\x64\packages，首次构建时 shim 会自己解包。'
+}
