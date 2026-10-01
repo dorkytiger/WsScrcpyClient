@@ -1,0 +1,100 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Widget Preview related
+.widget_preview/
+
+# M0 协议探测的临时产物（抓下来的网页 bundle、脚本、探测报告）
+# 需要复现时用 tools/probe.dart 重新抓取；结论已固化在 docs/ws-scrcpy-protocol.md
+/.probe/
+
+# 沙箱环境下重定向的临时目录（见 AGENTS.md §3.2）
+/.tmp/
+
+# 由 tools\prepare_windows_deps.cmd 生成的离线 NuGet 配置（含本机路径）
+/NuGet.Config
+
+# ── 本项目补充（2026-10-01）────────────────────────────────────────────
+# 各平台的 build 中间产物（Flutter 默认模板没有列全，macOS/Linux 上尤其容易误提交）
+/android/build/
+/android/.gradle/
+/android/local.properties
+/android/app/.cxx/
+/ios/build/
+/macos/build/
+/linux/build/
+/windows/build/
+/windows/flutter/ephemeral/
+/macos/Flutter/ephemeral/
+/linux/flutter/ephemeral/
+/ios/Flutter/ephemeral/
+/ios/Flutter/Generated.xcconfig
+/ios/Flutter/flutter_export_environment.sh
+**/Flutter/ephemeral/
+**/.symlinks/
+**/Pods/
+**/xcuserdata/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# Visual Studio / Xcode / 编辑器本机文件
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# 原生侧诊断产物（会随运行不断增长，不要进版本库）
+# 抓帧（WS_CAPTURE_FRAMES / exe 同目录 ws_capture.txt 触发）
+capture.bin
+ws_capture.txt
+# 解码器日志与引擎 stderr（*.log 已覆盖，这里显式再标一次便于搜索）
+scrcpy_decoder.log
+engine_stderr.log
+
+# 原生自测/探针留下的零字节或临时产物
+/RGB
+/RGBA
+

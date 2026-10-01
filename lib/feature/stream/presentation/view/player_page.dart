@@ -1,0 +1,768 @@
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, PointerScrollEvent, PointerSignalEvent;
+import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
+import 'package:ws_scrcpy_client/common/widget/async_state_view.dart';
+import 'package:ws_scrcpy_client/core/control/command_control_message.dart';
+import 'package:ws_scrcpy_client/core/control/touch_control_message.dart';
+import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
+import 'package:ws_scrcpy_client/core/log/app_logger.dart';
+import 'package:ws_scrcpy_client/core/result/result.dart';
+import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
+import 'package:ws_scrcpy_client/core/util/message_of.dart';
+import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport.dart';
+import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
+import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
+import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
+
+/// 投流页。
+///
+/// 当前里程碑（M1 + 协议层）已完成：连接、初始信息头解析、视频参数下发、
+/// 断线重连、快捷栏按键；**画面解码**在 M2 接入（见 `FLUTTER_AGENT.md` §5），
+/// 因此这里先渲染会话状态与视频数据统计，并保留日志面板用于排查协议问题。
+class PlayerPage extends StatefulWidget {
+  const PlayerPage({
+    super.key,
+    required this.viewModel,
+    required this.target,
+    required this.title,
+    this.authorization,
+    this.keepScreenOn = true,
+  });
+
+  final PlayerViewModel viewModel;
+  final StreamTarget target;
+  final String title;
+  final String? authorization;
+  final bool keepScreenOn;
+
+  @override
+  State<PlayerPage> createState() => _PlayerPageState();
+}
+
+class _PlayerPageState extends State<PlayerPage> {
+  final AppLogger _logger = AppLogger('PlayerPage');
+
+  /// 物理键盘要有人拿着焦点才会往这里送事件；点画面时抢一次焦点。
+  final FocusNode _keyboardFocusNode = FocusNode(debugLabel: 'ws-scrcpy-input');
+  bool _showLogs = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.viewModel.connect(
+        target: widget.target,
+        authorization: widget.authorization,
+      );
+      _keyboardFocusNode.requestFocus();
+    });
+    _setWakelock(widget.keepScreenOn);
+  }
+
+  @override
+  void dispose() {
+    _keyboardFocusNode.dispose();
+    _setWakelock(false);
+    super.dispose();
+  }
+
+  /// 屏幕常亮是平台副作用，放在 view 层；失败只记日志，不打断投流。
+  void _setWakelock(bool enable) {
+    final future = enable ? WakelockPlus.enable() : WakelockPlus.disable();
+    future.catchError((Object error, StackTrace stackTrace) {
+      _logger.warn('设置屏幕常亮失败', error, stackTrace);
+    });
+  }
+
+  Future<void> _send(Future<Result<void>> Function() action) async {
+    final result = await action();
+    if (result.isError && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(messageOf(result.error))));
+    }
+  }
+
+  /// 打开"更多"面板并派发选中的动作。
+  ///
+  /// 先关面板再发命令：避免命令失败时 SnackBar 被面板盖住看不见。
+  Future<void> _openMoreActions() async {
+    final action = await showModalBottomSheet<_MoreAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) =>
+          _MoreActionsSheet(viewModel: widget.viewModel),
+    );
+    if (action == null || !mounted) {
+      return;
+    }
+    switch (action) {
+      case _MoreAction.wakeDevice:
+        await _send(
+          () => Future<Result<void>>.value(widget.viewModel.wakeDevice()),
+        );
+      case _MoreAction.volumeUp:
+        await _send(
+          () => widget.viewModel.pressNavigationKey(NavigationKey.volumeUp),
+        );
+      case _MoreAction.volumeDown:
+        await _send(
+          () => widget.viewModel.pressNavigationKey(NavigationKey.volumeDown),
+        );
+      case _MoreAction.power:
+        await _send(
+          () => widget.viewModel.pressNavigationKey(NavigationKey.power),
+        );
+      case _MoreAction.rotateDevice:
+        await _send(
+          () => widget.viewModel.sendCommand(CommandType.rotateDevice),
+        );
+      case _MoreAction.expandNotifications:
+        await _send(
+          () =>
+              widget.viewModel.sendCommand(CommandType.expandNotificationPanel),
+        );
+      case _MoreAction.expandSettings:
+        await _send(
+          () => widget.viewModel.sendCommand(CommandType.expandSettingsPanel),
+        );
+      case _MoreAction.collapsePanels:
+        await _send(
+          () => widget.viewModel.sendCommand(CommandType.collapsePanels),
+        );
+      case _MoreAction.disconnect:
+        await widget.viewModel.disconnect();
+        if (mounted) {
+          Navigator.of(context).maybePop();
+        }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.viewModel,
+      builder: (BuildContext context, _) {
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(widget.title),
+            actions: <Widget>[
+              IconButton(
+                tooltip: _showLogs ? '隐藏日志' : '显示日志',
+                onPressed: () => setState(() => _showLogs = !_showLogs),
+                icon: Icon(_showLogs ? Icons.article : Icons.article_outlined),
+              ),
+            ],
+          ),
+          body: AsyncStateView<StreamSessionSnapshot>(
+            state: widget.viewModel.state,
+            onRetry: widget.viewModel.retry,
+            errorHint: widget.target.candidateUris.isEmpty
+                ? '设备未上报网卡地址'
+                : '已尝试 ${widget.target.candidateUris.length} 个地址（代理优先）',
+            loadingBuilder: (BuildContext context) => const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  CircularProgressIndicator(),
+                  SizedBox(height: AppSpacing.md),
+                  Text('正在建立投流连接…'),
+                ],
+              ),
+            ),
+            dataBuilder: (BuildContext context, StreamSessionSnapshot data) =>
+                Column(
+                  children: <Widget>[
+                    Expanded(
+                      child: _VideoStage(
+                        snapshot: data,
+                        viewModel: widget.viewModel,
+                        focusNode: _keyboardFocusNode,
+                      ),
+                    ),
+                    // 只留最常用的四个入口，其余动作收进"更多"面板，
+                    // 避免底部一排按钮把画面挤掉。
+                    _QuickBar(
+                      enabled: data.status.isUsable,
+                      onBack: () => _send(
+                        () => widget.viewModel.pressNavigationKey(
+                          NavigationKey.back,
+                        ),
+                      ),
+                      onHome: () => _send(
+                        () => widget.viewModel.pressNavigationKey(
+                          NavigationKey.home,
+                        ),
+                      ),
+                      onRecents: () => _send(
+                        () => widget.viewModel.pressNavigationKey(
+                          NavigationKey.recents,
+                        ),
+                      ),
+                      onMore: _openMoreActions,
+                    ),
+                    if (_showLogs) _LogPanel(logs: widget.viewModel.logs),
+                  ],
+                ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 画面区域 + 输入层（M3）。
+///
+/// Android（M2 路线 A）：原生 MediaCodec 解出来的画面通过 [Texture] 渲染；
+/// Windows（M2 路线 A）：Media Foundation MFT 解出 NV12 后转 BGRA 走像素缓冲纹理，
+/// 同样通过 [Texture] 渲染；其它平台保留状态占位。
+///
+/// 输入：手指/鼠标按下拖动 → 触摸消息；滚轮 → 滚动消息；物理键盘 → 按键消息。
+/// 坐标统一先经 [VideoViewport] 换算成**视频像素**，落在黑边上的一律忽略。
+class _VideoStage extends StatelessWidget {
+  const _VideoStage({
+    required this.snapshot,
+    required this.viewModel,
+    required this.focusNode,
+  });
+
+  final StreamSessionSnapshot snapshot;
+  final PlayerViewModel viewModel;
+  final FocusNode focusNode;
+
+  /// 输入诊断日志：把"原始指针事件 → 视频像素坐标"这一段单独打出来。
+  ///
+  /// 为什么要专门一条：用户报告"点一下像触发两次 / 总差上一次"。要判断是**事件重复**
+  /// 还是**坐标换算/时序**问题，必须同时看到"控件内坐标"和"换算后的视频像素"——
+  /// 视图层给前者，[PlayerViewModel] 给后者（带发出序号），两边的序号/坐标一对就定位了。
+  static final AppLogger _inputLogger = AppLogger('Input');
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        // 横竖屏切换 / 窗口缩放后按新尺寸重算编码边界，画面才会重新填满。
+        final available = Size(constraints.maxWidth, constraints.maxHeight);
+        if (available.width > 0 && available.height > 0) {
+          final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            viewModel.applyViewportSize(available, pixelRatio);
+          });
+        }
+        return _buildStage(context, constraints);
+      },
+    );
+  }
+
+  Widget _buildStage(BuildContext context, BoxConstraints constraints) {
+    final textureId = viewModel.textureId;
+    if (textureId == null) {
+      return _VideoPlaceholder(
+        snapshot: snapshot,
+        decoderError: viewModel.decoderError,
+        isDecoderCreating: viewModel.isDecoderCreating,
+        isNativeDecodingSupported: viewModel.isNativeDecodingSupported,
+        onRetryDecoder: viewModel.retryDecoder,
+      );
+    }
+
+    final size = viewModel.videoSize;
+    final aspectRatio = (size == null || size.height == 0)
+        ? 16 / 9
+        : size.width / size.height;
+    final viewport = viewModel.viewportFor(
+      viewWidth: constraints.maxWidth,
+      viewHeight: constraints.maxHeight,
+    );
+    final interactive = viewport != null && snapshot.status.isUsable;
+
+    final video = Container(
+      color: Colors.black,
+      width: double.infinity,
+      alignment: Alignment.center,
+      child: AspectRatio(
+        aspectRatio: aspectRatio,
+        child: Texture(textureId: textureId),
+      ),
+    );
+    if (!interactive) {
+      return video;
+    }
+
+    return Focus(
+      focusNode: focusNode,
+      onKeyEvent: (FocusNode node, KeyEvent event) {
+        final result = viewModel.handleKeyEvent(event);
+        return result == null ? KeyEventResult.ignored : KeyEventResult.handled;
+      },
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (PointerDownEvent event) {
+          focusNode.requestFocus();
+          _sendTouch(TouchAction.down, event, viewport);
+        },
+        onPointerMove: (PointerMoveEvent event) =>
+            _sendTouch(TouchAction.move, event, viewport),
+        onPointerUp: (PointerUpEvent event) =>
+            _sendTouch(TouchAction.up, event, viewport),
+        onPointerCancel: (PointerCancelEvent event) =>
+            _sendTouch(TouchAction.up, event, viewport),
+        onPointerSignal: (PointerSignalEvent event) =>
+            _sendScroll(event, viewport),
+        child: video,
+      ),
+    );
+  }
+
+  void _sendTouch(
+    TouchAction action,
+    PointerEvent event,
+    VideoViewport viewport,
+  ) {
+    final point = viewport.toVideoPoint(
+      event.localPosition.dx,
+      event.localPosition.dy,
+    );
+    if (point == null) {
+      // 黑边上的触摸不转发：投过去设备会点到他不想点的地方。
+      // 但要记账——"点了没反应"经常就是点在黑边上了（视图层给的是控件内坐标，
+      // 视频像素坐标由 ViewModel 统一记录，两边对不上时一眼能看出是换算前的坑）。
+      viewModel.noteInputRejected(
+        action: action,
+        pointerId: event.pointer,
+        localX: event.localPosition.dx,
+        localY: event.localPosition.dy,
+        reason: viewport.isUsable
+            ? '黑边（画面 ${viewport.videoWidth}x${viewport.videoHeight} '
+                  '绘于 ${viewport.displayWidth.toStringAsFixed(1)}x'
+                  '${viewport.displayHeight.toStringAsFixed(1)}，'
+                  '偏移 ${viewport.offsetX.toStringAsFixed(1)},'
+                  '${viewport.offsetY.toStringAsFixed(1)}）'
+            : '视口不可用（$viewport）',
+      );
+      return;
+    }
+    // 视图层只记"原始事件"（哪种设备、控件内坐标、按下/抬起），与 ViewModel 那条
+    // "视频像素坐标 + 序号"拼起来就是完整链路：原始 → 换算 → 发出。
+    if (action != TouchAction.move) {
+      _inputLogger.info(
+        '原始 ${action.name} id=${event.pointer} kind=${event.kind.name} '
+        '控件内=(${event.localPosition.dx.toStringAsFixed(1)},'
+        '${event.localPosition.dy.toStringAsFixed(1)}) → '
+        '视频=(${point.x},${point.y})',
+      );
+    }
+    viewModel.sendTouch(
+      action: action,
+      // Flutter 的 pointer 本身就能当 scrcpy 的 pointerId（只需在连接内唯一），
+      // 直接用它就能天然支持多指。
+      pointerId: event.pointer,
+      x: point.x,
+      y: point.y,
+      // 鼠标要带按键位，否则设备端收不到"按下"的语义。
+      buttons: event.kind == PointerDeviceKind.mouse
+          ? AndroidMotionEventButtons.primary
+          : 0,
+    );
+  }
+
+  void _sendScroll(PointerSignalEvent event, VideoViewport viewport) {
+    if (event is! PointerScrollEvent) {
+      return;
+    }
+    final point = viewport.toVideoPoint(
+      event.localPosition.dx,
+      event.localPosition.dy,
+    );
+    if (point == null) {
+      return;
+    }
+    // 与服务端网页端一致：取方向并**取反**（delta>0 记 -1，delta<0 记 1）。
+    viewModel.sendScroll(
+      x: point.x,
+      y: point.y,
+      hScroll: -event.scrollDelta.dx.sign.round(),
+      vScroll: -event.scrollDelta.dy.sign.round(),
+    );
+  }
+}
+
+/// 还没有画面时显示状态与排查提示（三态里的"信息态"）。
+class _VideoPlaceholder extends StatelessWidget {
+  const _VideoPlaceholder({
+    required this.snapshot,
+    required this.decoderError,
+    required this.isDecoderCreating,
+    required this.isNativeDecodingSupported,
+    required this.onRetryDecoder,
+  });
+
+  final StreamSessionSnapshot snapshot;
+  final GlobalException? decoderError;
+  final bool isDecoderCreating;
+  final bool isNativeDecodingSupported;
+  final Future<void> Function() onRetryDecoder;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final display = snapshot.display;
+    return Container(
+      color: Colors.black,
+      width: double.infinity,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Icon(
+                snapshot.hasVideo ? Icons.smart_display : Icons.hourglass_empty,
+                color: theme.colorScheme.onInverseSurface,
+                size: AppIconSize.xl,
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Text(
+                snapshot.hasVideo ? '已收到视频数据（M2 接入解码后在此渲染）' : '已连接，等待视频数据',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: theme.colorScheme.onInverseSurface,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                '状态：${snapshot.status.description}'
+                '${display == null ? '' : ' · 分辨率 ${display.displayInfo.size}'}'
+                '${snapshot.deviceName == null ? '' : ' · ${snapshot.deviceName}'}',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onInverseSurface,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                '视频帧：${snapshot.videoFrameCount} · 已接收：${(snapshot.videoBytes / 1024).toStringAsFixed(0)} KiB'
+                '${snapshot.activeUri == null ? '' : '\n链路：${snapshot.activeUri}'}',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onInverseSurface,
+                ),
+              ),
+              if (decoderError != null) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                Text(
+                  '原生解码失败：${decoderError!.message}',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                FilledButton.tonalIcon(
+                  onPressed: () => onRetryDecoder(),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('重试解码'),
+                ),
+              ] else if (isDecoderCreating) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                const SizedBox(
+                  width: AppIconSize.md,
+                  height: AppIconSize.md,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                  '正在启动原生解码器…',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onInverseSurface,
+                  ),
+                ),
+              ] else if (snapshot.hasVideo &&
+                  isNativeDecodingSupported &&
+                  !snapshot.status.isUsable) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                Text(
+                  '连接已断开，等待重连后继续解码。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onInverseSurface,
+                  ),
+                ),
+              ],
+              if (!snapshot.hasVideo &&
+                  snapshot.status == StreamConnectionStatus.connected) ...[
+                const SizedBox(height: AppSpacing.lg),
+                Text(
+                  '已建立投流会话，但还没收到视频数据。\n'
+                  '若持续如此，请检查服务端设备端的 scrcpy-server 是否正常'
+                  '（见 FLUTTER_AGENT.md §1），或换一个投流地址重试。',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onInverseSurface,
+                  ),
+                ),
+              ],
+              if (snapshot.hasVideo && !isNativeDecodingSupported) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                Text(
+                  '收到的是裸 H.264（Annex-B，一条消息一帧）。\n'
+                  '原生解码目前已在 Android 与 Windows 上实现；其它平台可先用设备卡片上的'
+                  '"网页"入口观看。',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onInverseSurface,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "更多"面板里的动作：文案与图标都挂在枚举上，UI 不再散落字符串。
+enum _MoreAction {
+  wakeDevice('唤醒设备屏幕', Icons.lightbulb_outline),
+  volumeUp('音量 +', Icons.volume_up_outlined),
+  volumeDown('音量 −', Icons.volume_down_outlined),
+  power('电源键', Icons.power_settings_new),
+  rotateDevice('旋转设备屏幕', Icons.screen_rotation),
+  expandNotifications('下拉通知面板', Icons.notifications_outlined),
+  expandSettings('下拉快捷设置', Icons.tune),
+  collapsePanels('收起面板', Icons.keyboard_arrow_down),
+  disconnect('断开投流', Icons.link_off);
+
+  const _MoreAction(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+
+  /// 是否属于危险/收尾动作（在面板里单独分组）。
+  bool get isDestructive => this == _MoreAction.disconnect;
+}
+
+/// 常驻快捷栏：只保留最高频的三个导航键 + "更多"。
+///
+/// 早期版本把音量/电源/旋转/面板都平铺在底部，一排 8 个按钮把画面挤得很小；
+/// 现在其余动作都进 [_MoreActionsSheet]。
+class _QuickBar extends StatelessWidget {
+  const _QuickBar({
+    required this.enabled,
+    required this.onBack,
+    required this.onHome,
+    required this.onRecents,
+    required this.onMore,
+  });
+
+  final bool enabled;
+  final VoidCallback onBack;
+  final VoidCallback onHome;
+  final VoidCallback onRecents;
+  final VoidCallback onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerHigh,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.sm,
+            vertical: AppSpacing.xs,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: <Widget>[
+              _QuickBarButton(
+                icon: Icons.arrow_back,
+                label: '返回',
+                onPressed: enabled ? onBack : null,
+              ),
+              _QuickBarButton(
+                icon: Icons.home_outlined,
+                label: '主页',
+                onPressed: enabled ? onHome : null,
+              ),
+              _QuickBarButton(
+                icon: Icons.apps,
+                label: '最近',
+                onPressed: enabled ? onRecents : null,
+              ),
+              _QuickBarButton(
+                icon: Icons.more_horiz,
+                label: '更多',
+                onPressed: enabled ? onMore : null,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 单个快捷栏按钮：图标在上、文案在下，点击区域够大（拇指可及）。
+class _QuickBarButton extends StatelessWidget {
+  const _QuickBarButton({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = onPressed == null
+        ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+        : theme.colorScheme.onSurface;
+    return InkWell(
+      onTap: onPressed,
+      borderRadius: BorderRadius.circular(AppRadius.md),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.xs,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: AppIconSize.lg, color: color),
+            const SizedBox(height: AppSpacing.xxs),
+            Text(
+              label,
+              style: theme.textTheme.labelSmall?.copyWith(color: color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "更多"面板：音量 / 电源 / 旋转 / 面板 / 断开。
+///
+/// 投流页默认横屏、可用高度很小，所以这里用**紧凑按钮墙 + 可滚动**，
+/// 而不是一列 ListTile（那会在横屏 / 小高度下竖直溢出——widget 测试抓到过）。
+class _MoreActionsSheet extends StatelessWidget {
+  const _MoreActionsSheet({required this.viewModel});
+
+  final PlayerViewModel viewModel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final actions = _MoreAction.values
+        .where((_MoreAction action) => !action.isDestructive)
+        .toList(growable: false);
+    return SafeArea(
+      top: false,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.sm,
+              AppSpacing.lg,
+              0,
+            ),
+            child: Row(
+              children: <Widget>[
+                Text('更多操作', style: theme.textTheme.titleMedium),
+              ],
+            ),
+          ),
+          // 自动唤醒开关：设备屏幕休眠时 scrcpy 一帧都不发（"进去黑屏、点一下才有反应"
+          // 就是这个），所以这个开关默认打开，并且放在面板最上面让用户能第一时间找到。
+          ListenableBuilder(
+            listenable: viewModel,
+            builder: (BuildContext context, _) => SwitchListTile(
+              value: viewModel.wakeOnConnect,
+              onChanged: viewModel.setWakeOnConnect,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.lg,
+              ),
+              title: const Text('连接后自动唤醒设备'),
+              subtitle: const Text('设备屏幕休眠时不会发画面，连上后自动按一次唤醒键'),
+            ),
+          ),
+          const Divider(height: 1),
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.lg,
+                AppSpacing.md,
+                AppSpacing.lg,
+                AppSpacing.md,
+              ),
+              child: Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                children: <Widget>[
+                  for (final action in actions)
+                    FilledButton.tonalIcon(
+                      onPressed: () => Navigator.of(context).pop(action),
+                      icon: Icon(action.icon),
+                      label: Text(action.label),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const Divider(height: 1),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.sm,
+                vertical: AppSpacing.xs,
+              ),
+              child: TextButton.icon(
+                onPressed: () =>
+                    Navigator.of(context).pop(_MoreAction.disconnect),
+                icon: const Icon(Icons.link_off),
+                label: const Text('断开投流'),
+                style: TextButton.styleFrom(
+                  foregroundColor: theme.colorScheme.error,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 日志面板：协议异常与重连过程的可观测性入口。
+class _LogPanel extends StatelessWidget {
+  const _LogPanel({required this.logs});
+
+  final List<String> logs;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      height: AppSpacing.xxl * 6,
+      color: theme.colorScheme.surfaceContainerLow,
+      child: logs.isEmpty
+          ? const Center(child: Text('暂无日志'))
+          : ListView.builder(
+              padding: const EdgeInsets.all(AppSpacing.sm),
+              itemCount: logs.length,
+              itemBuilder: (BuildContext context, int index) =>
+                  Text(logs[index], style: theme.textTheme.bodySmall),
+            ),
+    );
+  }
+}

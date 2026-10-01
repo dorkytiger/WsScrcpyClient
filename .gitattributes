@@ -1,0 +1,55 @@
+# 换行符统一（2026-10-01 加：项目要在 Windows 与 macOS 之间来回开发）
+#
+# **为什么需要它**：Windows 上 git 默认 `core.autocrlf=true`，会把仓库里的 LF
+# 在工作区换成 CRLF；换到 Mac 再改一次，diff 就会变成"整个文件都改了"，
+# 真正的代码改动被淹没。这里显式规定：**仓库里一律 LF**，Windows 专有的
+# 脚本（.cmd/.ps1/.bat）保持 CRLF（那是 Windows 自己要求的）。
+* text=auto eol=lf
+
+# Windows 专有脚本：CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 明确按文本处理
+*.dart  text eol=lf
+*.kt    text eol=lf
+*.swift text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.cc    text eol=lf
+*.c     text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.xml   text eol=lf
+*.cmake text eol=lf
+*.plist text eol=lf
+*.entitlements text eol=lf
+*.txt   text eol=lf
+
+# 二进制：绝对不要做换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.ttf  binary
+*.otf  binary
+*.jar  binary
+*.keystore binary
+*.bin  binary
+*.nupkg binary
+*.exe  binary
+*.dll  binary
+*.lib  binary
+*.pdb  binary
+*.so   binary
+*.a    binary
+*.dylib binary
+*.zip  binary
+*.sqlite binary
+*.xcuserstate binary
