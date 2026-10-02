@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
+import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
 import 'package:ws_scrcpy_client/core/state/async_state.dart';
 import 'package:ws_scrcpy_client/core/util/message_of.dart';
 import 'package:ws_scrcpy_client/feature/settings/application/service/settings_service.dart';
@@ -129,8 +130,15 @@ class _ProfileSetupPageState extends State<ProfileSetupPage> {
                 ),
                 const SizedBox(height: AppSpacing.sm),
                 Text(
-                  '填写 ws-scrcpy 服务入口；服务端开启了 Basic Auth 时再填账号密码。\n'
-                  '配置保存在本机数据库中，密码写入系统安全存储。',
+                  // web 上**不能**让用户以为"填了密码就能连上"：浏览器不允许 WebSocket
+                  // 携带自定义请求头，我们根本用不到这个密码，凭据由浏览器自己按 origin 保管。
+                  // 让用户白填一次密码，正是"为什么还要我再登录一次"的来源。
+                  isWebPlatform
+                      ? '填写 ws-scrcpy 服务入口。\n'
+                            '密码不用填：Basic 凭据由浏览器保管 —— 连接时会弹一次系统登录框，'
+                            '输入后勾选「记住密码」，之后就不用再输了。'
+                      : '填写 ws-scrcpy 服务入口；服务端开启了 Basic Auth 时再填账号密码。\n'
+                            '配置保存在本机数据库中，密码写入系统安全存储。',
                   textAlign: TextAlign.center,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
@@ -161,27 +169,31 @@ class _ProfileSetupPageState extends State<ProfileSetupPage> {
                   ),
                 ),
                 const SizedBox(height: AppSpacing.md),
-                TextField(
-                  controller: _passwordController,
-                  obscureText: _obscurePassword,
-                  autofillHints: const <String>[AutofillHints.password],
-                  onSubmitted: (_) => isSaving ? null : _submit(),
-                  decoration: InputDecoration(
-                    labelText: 'Basic Auth 密码（可留空）',
-                    border: const OutlineInputBorder(),
-                    prefixIcon: const Icon(Icons.lock_outline),
-                    suffixIcon: IconButton(
-                      tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
-                      onPressed: () =>
-                          setState(() => _obscurePassword = !_obscurePassword),
-                      icon: Icon(
-                        _obscurePassword
-                            ? Icons.visibility_off
-                            : Icons.visibility,
+                // 密码框在 web 上**藏起来**：填了也用不上（浏览器不给 WebSocket 加请求头），
+                // 留着只会让人以为"填了密码就能连"。
+                if (!isWebPlatform)
+                  TextField(
+                    controller: _passwordController,
+                    obscureText: _obscurePassword,
+                    autofillHints: const <String>[AutofillHints.password],
+                    onSubmitted: (_) => isSaving ? null : _submit(),
+                    decoration: InputDecoration(
+                      labelText: 'Basic Auth 密码（可留空）',
+                      border: const OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.lock_outline),
+                      suffixIcon: IconButton(
+                        tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
+                        onPressed: () => setState(
+                          () => _obscurePassword = !_obscurePassword,
+                        ),
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                        ),
                       ),
                     ),
                   ),
-                ),
                 const SizedBox(height: AppSpacing.sm),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,

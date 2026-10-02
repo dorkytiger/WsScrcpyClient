@@ -483,6 +483,27 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
   是同一个套路。**注意 drift_dev 2.35 已经没有 `make-web-worker` 子命令了**，
   `drift_worker.js` 是 drift 包**自带编译好的**。
 
+#### 第二轮：用户实测"每次点击都要 basic auth + 报错"，查出两件事
+
+**① 服务端没有任何非交互鉴权路径**（curl 实测）：401 是 **openresty（nginx）** 发的
+（`www-authenticate: Basic realm="Authentication"`），不是 Node 应用层；
+响应里**没有 Set-Cookie**，也没有 query/token 形式的凭据 —— 所以 web 上
+只能走"浏览器代管 Basic 凭据"这一条路，没有捷径。
+
+**② "每次都弹"是被自动重连放大的**（这才是我们自己的锅）：
+认证失败 → 立刻重连 → 又一次未认证握手 → 再弹一次 → …… 无限循环。
+修法见 `isAuthFailure()`（`ws_error_translator.dart`）+ `StreamSessionService._handleFailure`：
+**鉴权失败直接进 `failed`，停掉自动重连**，把提示与「重试」交给用户。
+回归测试两侧都钉住了（鉴权失败不重连 / 普通失败照常重连），并做过 A/B（去掉修复立刻变红）。
+
+顺带把"误导用户"的两处也改了：
+
+- **web 上不显示密码输入框**（`ProfileSetupPage` 里 `if (!isWebPlatform)`）：
+  浏览器不给 WebSocket 加请求头，填了也用不上 —— 让用户白填一次密码，
+  正是他问"为什么还要我再登录一次"的来源。原生端保留（有测试守着）。
+- `tools/build_web.sh`：一条命令打包（`--no-web-resources-cdn` + 可传 `--base-href`），
+  方便按上面的"同源部署"挂到服务端 `/app/` 下。
+
 #### 已知未解决（下次接着做）
 
 - **中文字在浏览器里显示成方块**：Flutter web 的 CJK 回退字体要从 `fonts.gstatic.com` 按需下载

@@ -24,6 +24,24 @@ void main() {
     );
   }
 
+  /// ★ 原生端必须**保留**密码输入框。
+  ///
+  /// 对照背景（2026-10-02）：web 上密码框被藏掉了 —— 浏览器不允许 WebSocket 携带
+  /// 自定义请求头，填了也用不上，留着只会让人以为"填了密码就能连"。
+  /// 但这个 `if (!isWebPlatform)` 是**编译期**分支（VM 上恒为原生），
+  /// 所以这条测试守的是"原生端别被顺手改没"，web 那一侧只能靠浏览器实跑看。
+  testWidgets('原生端保留 Basic Auth 密码输入框（web 上才隐藏）', (WidgetTester tester) async {
+    final context = SettingsTestContext();
+    addTearDown(context.dispose);
+    final viewModel = SettingsViewModel(context.service);
+    addTearDown(viewModel.dispose);
+
+    await pumpSetupPage(tester, viewModel);
+
+    expect(find.text('Basic Auth 密码（可留空）'), findsOneWidget);
+    expect(find.textContaining('密码写入系统安全存储'), findsOneWidget);
+  });
+
   testWidgets('首次进入：地址非法时给出校验提示且不落库', (WidgetTester tester) async {
     final context = SettingsTestContext();
     addTearDown(context.dispose);
