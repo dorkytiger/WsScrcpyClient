@@ -18,6 +18,7 @@ import 'package:ws_scrcpy_client/core/stream/stream_initial_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
 import 'package:ws_scrcpy_client/core/ws/reconnect_policy.dart';
+import 'package:ws_scrcpy_client/core/ws/ws_error_translator.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/stream_remote_datasource.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
@@ -715,6 +716,16 @@ class StreamSessionService {
     }
     if (_stopped) {
       return successVoid();
+    }
+    // 鉴权失败**不自动重连**（2026-10-02 用户实测："每次点击都要 basic auth"）。
+    //
+    // web 上浏览器不给 WebSocket 带自定义请求头，每次未认证握手都会再弹一次
+    // Basic Auth 登录框；而自动重连（指数退避 + 多候选地址）会把这个过程**刷屏**。
+    // 正确的做法是停下来，把"浏览器需要你登录一次"的提示和"重试"按钮交给用户。
+    if (isAuthFailure(error)) {
+      _log('鉴权失败，停止自动重连（重复重连只会反复触发浏览器的 Basic Auth 登录框）');
+      _emit(_snapshot.copyWith(status: StreamConnectionStatus.failed));
+      return Result.failure(error);
     }
     if (_attempt >= maxReconnectAttempts) {
       _log('重连次数已达上限（$maxReconnectAttempts 次），停止自动重连');

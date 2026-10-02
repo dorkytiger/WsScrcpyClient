@@ -69,3 +69,17 @@ GlobalException translateHandshakeError(Object error, StackTrace stackTrace) {
     stackTrace: stackTrace,
   );
 }
+
+/// 鉴权类握手失败里都会出现这个短语（原生与网页两条文案共用同一处定义，
+/// 所以 [isAuthFailure] 不会因为改了文案而悄悄失效）。
+const String _authMarker = 'Basic Auth';
+
+/// 这次失败是不是"**需要人介入的鉴权问题**"。
+///
+/// 为什么需要这个判定：**自动重连在鉴权失败时是有害的**。
+/// 原生端凭据错了，重连一百次也还是错；web 端更糟 ——
+/// 浏览器不给 WebSocket 带自定义请求头，每次未认证的握手都会**再弹一次登录框**，
+/// 于是用户看到的就是"一次又一次地要 Basic Auth"（2026-10-02 用户实测反馈）。
+/// 所以调用方应当**停掉自动重连**，把提示和"重试"按钮交给用户。
+bool isAuthFailure(GlobalException error) =>
+    error.message.contains(_authMarker);

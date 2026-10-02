@@ -17,8 +17,10 @@ QueryExecutor openAppDatabaseExecutor() => driftDatabase(
     driftWorker: Uri.parse('drift_worker.js'),
     onResult: (WasmDatabaseResult result) {
       // ignore: avoid_print
-      print('[WebDB] 打开方式=${result.chosenImplementation} '
-          '缺失特性=${result.missingFeatures}');
+      print(
+        '[WebDB] 打开方式=${result.chosenImplementation} '
+        '缺失特性=${result.missingFeatures}',
+      );
     },
   ),
 );

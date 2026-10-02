@@ -10,7 +10,9 @@ import 'package:ws_scrcpy_client/core/stream/display_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
 import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
+import 'package:ws_scrcpy_client/core/ws/ws_error_translator.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/stream_remote_datasource.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
 
@@ -400,4 +402,104 @@ void main() {
     final result = service.applyViewportBounds(width: 123, height: 456);
     expect(result.isError, isTrue);
   });
+
+  /// ★ 回归（2026-10-02 用户实测："每次点击都要 basic auth"）。
+  ///
+  /// 服务端是 nginx 层的 Basic Auth，浏览器**不给 WebSocket 加自定义请求头**，
+  /// 于是每次未认证握手都会再弹一次登录框。而自动重连（指数退避 + 多候选地址）
+  /// 会把这个过程刷屏 —— 所以**鉴权失败必须停下来**，把提示和重试按钮交给用户。
+  group('★ 鉴权失败不自动重连', () {
+    test('鉴权失败 → 直接 failed，不再安排重连', () async {
+      final service = StreamSessionService(
+        _AuthFailingDatasource(),
+        settingsFallbackDelay: Duration.zero,
+      );
+      addTearDown(service.dispose);
+
+      final statuses = <StreamConnectionStatus>[];
+      final subscription = service.snapshots.listen(
+        (StreamSessionSnapshot s) => statuses.add(s.status),
+      );
+      addTearDown(subscription.cancel);
+
+      final result = await service.start(
+        target,
+        authorization: 'Basic dGVzdDp0ZXN0',
+      );
+
+      expect(result.isError, isTrue);
+      expect(
+        isAuthFailure(result.error!),
+        isTrue,
+        reason: '翻译层应该把它认成鉴权失败：${result.error!.message}',
+      );
+      expect(service.snapshot.status, StreamConnectionStatus.failed);
+
+      // 等一段明显超过首次退避的时间：若还安排了重连，这里会看到第 2 次尝试。
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(
+        service.snapshot.status,
+        StreamConnectionStatus.failed,
+        reason: '鉴权失败后不该再自动重连（每次重连都会再弹一次浏览器登录框）',
+      );
+      expect(
+        statuses.where((s) => s == StreamConnectionStatus.reconnecting),
+        isEmpty,
+        reason: '不该进入重连态，实际状态序列：$statuses',
+      );
+    });
+
+    test('对照：非鉴权失败仍然照常重连（别把重连能力一起改坏）', () async {
+      final service = StreamSessionService(
+        // 这个假数据源在 transport 关闭时给的是普通失败，不含 Basic Auth 字样。
+        _FakeStreamRemoteDatasource(_closedTransport()),
+        settingsFallbackDelay: Duration.zero,
+      );
+      addTearDown(service.dispose);
+
+      final statuses = <StreamConnectionStatus>[];
+      final subscription = service.snapshots.listen(
+        (StreamSessionSnapshot s) => statuses.add(s.status),
+      );
+      addTearDown(subscription.cancel);
+
+      final result = await service.start(target);
+      expect(result.isError, isTrue);
+      expect(isAuthFailure(result.error!), isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        statuses.contains(StreamConnectionStatus.reconnecting),
+        isTrue,
+        reason: '普通失败应该进入重连态，实际：$statuses',
+      );
+    });
+  });
+}
+
+/// 一个"已经关掉"的假传输：让 [_FakeStreamRemoteDatasource] 走失败分支。
+_FakeTransport _closedTransport() {
+  final transport = _FakeTransport();
+  transport.isOpen = false;
+  return transport;
+}
+
+/// 返回"需要 Basic Auth"的失败（走真实的翻译函数，
+/// 这样测试同时钉住了"翻译层认得出鉴权失败"这件事）。
+class _AuthFailingDatasource extends StreamRemoteDatasource {
+  @override
+  Future<Result<StreamSession>> connect({
+    required Uri uri,
+    String? authorization,
+    Duration timeout = const Duration(seconds: 10),
+  }) async => Result.failure(
+    translateHandshakeError(
+      Exception(
+        'WebSocketException: Connection to $uri was not upgraded '
+        'to websocket (401 Unauthorized)',
+      ),
+      StackTrace.current,
+    ),
+  );
 }
