@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/common/widget/async_state_view.dart';
+import 'package:ws_scrcpy_client/core/debug/debug_bootstrap.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/state/async_state.dart';
@@ -17,7 +18,6 @@ class DeviceListPage extends StatefulWidget {
     required this.viewModel,
     required this.onStartStream,
     this.onOpenWebStream,
-    this.onOpenSettings,
     this.lastUdid,
   });
 
@@ -28,9 +28,6 @@ class DeviceListPage extends StatefulWidget {
 
   /// 用 WebView 打开该设备的网页版投流页。
   final Future<void> Function(DeviceVo device)? onOpenWebStream;
-
-  /// 未配置服务地址时的引导入口。
-  final VoidCallback? onOpenSettings;
 
   /// "上次使用过的设备"（来自设置）。
   final String? lastUdid;
@@ -79,15 +76,21 @@ class _DeviceListPageState extends State<DeviceListPage> {
     if (_autostartTriggered) {
       return;
     }
-    if (Platform.environment['WS_SCRCPY_AUTOSTART'] != '1') {
+    // 两条入口同一个语义：桌面端用宿主环境变量，iOS/Android 拿不到宿主环境变量，
+    // 用编译期的 `--dart-define=WS_SCRCPY_AUTOSTART=1`。
+    final fromEnvironment = Platform.environment['WS_SCRCPY_AUTOSTART'] == '1';
+    if (!fromEnvironment && !DebugBootstrap.isAutostartEnabled) {
       return;
     }
-    final DeviceVo? device = devices.where((DeviceVo item) => item.isUsable).firstOrNull;
+    final DeviceVo? device = devices
+        .where((DeviceVo item) => item.isUsable)
+        .firstOrNull;
     if (device == null) {
       return;
     }
     _autostartTriggered = true;
-    AppLogger('Autostart').info('WS_SCRCPY_AUTOSTART=1：自动打开设备 ${device.name}（${device.udid}）');
+    AppLogger('Autostart')
+        .info('WS_SCRCPY_AUTOSTART=1：自动打开设备 ${device.name}（${device.udid}）');
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         widget.onStartStream(device);
@@ -167,13 +170,6 @@ class _DeviceListPageState extends State<DeviceListPage> {
                   ),
                 ),
           ),
-          floatingActionButton: widget.onOpenSettings == null
-              ? null
-              : FloatingActionButton.extended(
-                  onPressed: widget.onOpenSettings,
-                  icon: const Icon(Icons.settings_outlined),
-                  label: const Text('服务设置'),
-                ),
         );
       },
     );

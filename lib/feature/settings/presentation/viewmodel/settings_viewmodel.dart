@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:ws_scrcpy_client/core/debug/debug_bootstrap.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/state/async_state.dart';
@@ -42,6 +43,11 @@ class SettingsViewModel extends ChangeNotifier {
   Future<void> load() async {
     _state = const AsyncLoading();
     notifyListeners();
+
+    // 诊断引导（`--dart-define`，不传就什么都不做）：还没有配置时先注入一条，
+    // 否则自动化环境（iOS 模拟器 / CI）会永远卡在首次进入的表单上。
+    // 见 core/debug/debug_bootstrap.dart。
+    await DebugBootstrap.ensureProfile(_service);
 
     final hasProfileResult = await _service.hasAnyProfile();
     if (hasProfileResult.isError) {

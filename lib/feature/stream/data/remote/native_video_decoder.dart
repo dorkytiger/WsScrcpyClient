@@ -9,7 +9,8 @@ import 'package:ws_scrcpy_client/core/stream/display_info.dart';
 /// 原生 H.264 硬解通道（与平台实现共用同一份 MethodChannel 契约）。
 ///
 /// - Android：`android/app/src/main/kotlin/.../ScrcpyVideoDecoder.kt`（MediaCodec）；
-/// - Windows：`windows/runner/scrcpy_video_decoder.cpp`（Media Foundation MFT）。
+/// - Windows：`windows/runner/scrcpy_video_decoder.cpp`（Media Foundation MFT）；
+/// - iOS / macOS：`darwin/ScrcpyVideoDecoder.swift`（VideoToolbox，**两端共用同一份**）。
 ///
 /// 只负责"建解码器 / 喂帧 / 收尺寸变化 / 释放"，不理解投流协议；
 /// 帧从哪来由 `StreamSessionService` 提供。
@@ -79,7 +80,7 @@ class NativeVideoDecoder {
     } on MissingPluginException catch (error, stackTrace) {
       return Result.failure(
         RemoteException(
-          message: '当前平台没有原生解码器实现（目前支持 Android / Windows）',
+          message: '当前平台没有原生解码器实现（目前支持 Android / Windows / iOS / macOS）',
           exception: error,
           stackTrace: stackTrace,
         ),
@@ -148,7 +149,7 @@ class NativeVideoDecoder {
     } on MissingPluginException catch (error, stackTrace) {
       result = failureVoid(
         RemoteException(
-          message: '当前平台没有原生解码器实现（目前支持 Android / Windows）',
+          message: '当前平台没有原生解码器实现（目前支持 Android / Windows / iOS / macOS）',
           exception: error,
           stackTrace: stackTrace,
         ),

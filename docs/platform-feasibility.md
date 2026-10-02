@@ -17,6 +17,45 @@
 
 ---
 
+## ⚠️ 实施结果回填（2026-10-02）：**iOS 与 macOS 都已实现**，请看 AGENTS.md §15
+
+**两端共用同一份代码**：三个 Swift 文件放在仓库根的 `darwin/`（Flutter 生态里 iOS+macOS 共享源码的
+惯例目录名），两个 Xcode 工程都用 `path = ../darwin` 的分组引用它们——**改一处两端同时生效**。
+两端都实跑并截图确认了画面上屏；macOS 侧只写了"注册"那一层（AGENTS §15.8）。
+
+本文是**实施前**的评估，下面的推断有几条被实践修正了。**实现细节与踩坑记录以
+`AGENTS.md` §15 / §15.8 为准**，这里只留"本文哪几条被推翻/证实"的索引：
+
+| 本文的说法 | 实际结果 |
+|---|---|
+| §3.1.1 `nalUnitHeaderLength: 4`、必须先做 Annex-B→AVCC | ✅ 正确，就是这条路 |
+| §3.1.2 起始码切分"建议先判 4 字节再判 3 字节，别照抄上面那段顺序" | ✅ 正确且关键；离线探针里有专门断言 |
+| §3.1.3 喂 `CMSampleBuffer` 的示例代码 | ⚠️ **不完整**：`CMBlockBufferCreateWithMemoryBlock(memoryBlock: nil)` 之后必须先 `CMBlockBufferAssureBlockMemory` 再 `ReplaceDataBytes`，否则静默失败、一帧都出不来 |
+| §3.1.4 建议把 `kVTDecompressionPropertyKey_MaximizePowerEfficiency` 设成 false | ❌ **不要照做**：`VTDecompressionProperties.h` 写明"与 `RealTime` 同设是未定义行为"，而它默认就是 false——不设才对 |
+| §3.1.5 输出像素格式选 `kCVPixelFormatType_32BGRA` | ✅ 正确，`FlutterTexture.h` 明写支持 32BGRA / 420v / 420f |
+| §3.2.1 从 `FlutterImplicitEngineBridge.pluginRegistry` 拿 `textures` | ⚠️ **要改**：`pluginRegistry` 给的是 registrar，而 `applicationRegistrar.textures()` 在隐式引擎 + Scene 下**注册返回 0**（relay 的 parent 是 weak）；必须退到 `FlutterViewController`（它自己实现了 `FlutterTextureRegistry`） |
+| §3.2.2 `copyPixelBuffer` 返回 `Unmanaged<CVPixelBuffer>?` + `passRetained` | ✅ 正确（已用 `xcrun swiftc -typecheck` 对着 `FlutterTexture` 验证过签名） |
+| §3.2.3 平台通道的整数类型（`textureId` 必须是 Dart 的 `int`） | ✅ 传 `Int64` 正常，Dart 侧拿到 `int` |
+| §1 "iOS 只在模拟器可行、真机没验证" 的保留 | 模拟器上**确实能跑**（走软件解码）；真机仍未验证 |
+| §3.1.4 "RealTime 建议设为 true" | ✅ 设了；且离线 A/B 证明 Apple 侧**默认就是实时**（true/false/不设三种都是 90/90 帧），没有 Windows 那种缓冲问题 |
+
+另外两条**本文完全没预见到**的：
+
+1. **`kVTDecompressionPropertyKey_...` 命名的 Swift 导入坑**：`VideoToolbox.apinotes` 把
+   `VTDecompressionSessionDecodeFrameWithOutputHandler` 重命名成
+   `VTDecompressionSessionDecodeFrame(_:sampleBuffer:flags:infoFlagsOut:outputHandler:)`，
+   照 C 头文件写会报 `Extraneous argument labels`。
+2. **编码边界（bounds）的宽高比必须跟设备一致**：本文只讨论了"别超过原生分辨率"，
+   没提比例。iOS 上（竖屏视口 + 横屏设备）因此出过一次"画面能出但很糊"——
+   详见 `AGENTS.md` §15.7。这条改的是**共享 Dart 逻辑，Windows 也受益**。
+3. **macOS 侧的注册路径与 iOS 不同**（§3.4 只写了"入口不同"）：macOS 的
+   `FlutterPluginRegistrar` 上 `messenger` / `textures` 是**属性**，iOS 的
+   `applicationRegistrar` 上是**方法**；模块名也从 `Flutter` 变成 `FlutterMacOS`。
+   实际做法（含 `darwin/` 共享目录与构造函数注入兜底注册表）见 `AGENTS.md` §15.8。
+
+
+---
+
 ## 1. 核心结论（先看这段）
 
 > 逐平台的完整对照表在文末 §8。

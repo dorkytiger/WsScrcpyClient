@@ -473,7 +473,8 @@ class StreamSessionService {
     });
   }
 
-  /// 把 UI 视口尺寸收敛成**绝不超过设备原生分辨率**的编码边界（见 AGENTS §12.7）。
+  /// 把 UI 视口尺寸收敛成**绝不超过设备原生分辨率、且与设备同宽高比**的编码边界
+  /// （见 AGENTS §12.7）。
   ///
   /// **数据依据（真机实测）**：设备原生 1280x720，而 UI 视口是 1898x853 —— 我们以前
   /// 把这个尺寸原样发给服务端，等于要求**在被控设备上放大 1.77 倍再编码**。
@@ -481,9 +482,18 @@ class StreamSessionService {
   /// 而同一设备在网页端流畅。放大是**显示层**的职责（客户端已有 `AspectRatio`/`Texture`
   /// 缩放），不该让被控设备多编像素。
   ///
-  /// 规则：`scale = min(1, min(原生宽/视口宽, 原生高/视口高))`，按比例缩到原生范围内；
-  /// 视口本来就 ≤ 原生时**保持不动**（也不放大到原生，避免白烧编码）；
-  /// 最后**按 16×16 宏块向下对齐**（见 [alignToMacroblock]）。
+  /// 规则三步：
+  /// 1. 把视口按**设备画面的宽高比**收成一个框（见下面"为什么必须做"）；
+  /// 2. `scale = min(1, min(原生宽/框宽, 原生高/框高))` 收敛到原生范围内
+  ///    ——视口本来就 ≤ 原生时**保持不动**（也不放大到原生，避免白烧编码）；
+  /// 3. 最后**按 16×16 宏块向下对齐**（见 [alignToMacroblock]）。
+  ///
+  /// **为什么第 1 步必须做（2026-10-02，iOS 模拟器实测）**：服务端是"把设备画面按比例
+  /// **装进** `bounds` 这个框"（不拉伸），所以框的宽高比与设备不一致时，**紧的那一边会把
+  /// 分辨率压死**。实测：竖屏视口 1206x1992（iPhone 竖着拿）、设备 1280x720 横屏，
+  /// 只做等比缩放得到 432x720 的**竖框**；服务端把 16:9 画面装进去只剩 **432x240** ——
+  /// 上屏要放大 2.96 倍，肉眼就是"糊"。按设备比例收框后是 1200x672，像素多了 7.7 倍。
+  /// 这不是"放大"：只是在视口范围内挑一个与设备同比例的框，上限仍由第 2 步保证。
   static VideoSize clampBoundsToNative({
     required VideoSize viewport,
     required VideoSize native,
@@ -494,19 +504,25 @@ class StreamSessionService {
     if (native.width <= 0 || native.height <= 0) {
       return alignToMacroblock(viewport);
     }
+
+    // 第 1 步：与设备同比例的框，内接于视口。
+    final nativeRatio = native.width / native.height;
+    var boxWidth = viewport.width.toDouble();
+    var boxHeight = boxWidth / nativeRatio;
+    if (boxHeight > viewport.height) {
+      boxHeight = viewport.height.toDouble();
+      boxWidth = boxHeight * nativeRatio;
+    }
+
+    // 第 2 步：绝不要求放大（AGENTS §12.7）。
     final scale = math.min(
       1.0,
-      math.min(native.width / viewport.width, native.height / viewport.height),
+      math.min(native.width / boxWidth, native.height / boxHeight),
     );
-    if (scale >= 1) {
-      return alignToMacroblock(viewport);
-    }
-    return alignToMacroblock(
-      VideoSize(
-        (viewport.width * scale).round(),
-        (viewport.height * scale).round(),
-      ),
-    );
+    final scaled = scale >= 1
+        ? VideoSize(boxWidth.round(), boxHeight.round())
+        : VideoSize((boxWidth * scale).round(), (boxHeight * scale).round());
+    return alignToMacroblock(scaled);
   }
 
   /// 把编码边界向下对齐到 16×16 宏块。

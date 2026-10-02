@@ -138,9 +138,9 @@ void main() {
     expect(sent.displayId, 0);
     // sendFrameMeta 必须为 false：我们解的是裸 Annex-B，不解析每帧前 12 字节帧信息。
     expect(sent.sendFrameMeta, isFalse);
-    // UI 还没报尺寸：沿用服务端给的 bounds，但**必须收敛到设备原生范围内 + 16 对齐**
+    // UI 还没报尺寸：沿用服务端给的 bounds，但**必须收敛到设备原生范围内 + 设备同比例 + 16 对齐**
     // （服务端给的 1856x960 大于原生 1280x720；见 AGENTS §12.7/§12.8）。
-    expect(sent.bounds, const VideoSize(1280, 656));
+    expect(sent.bounds, const VideoSize(1280, 720));
   });
 
   test('首发只发一条且带上 UI 的最终视口尺寸（不先发 null 再补发）', () async {
@@ -157,8 +157,9 @@ void main() {
     );
     expect(settings, hasLength(1), reason: '首发必须一次到位，不能补发第二条');
     // 视口 1898x853 大于设备原生 1280x720 → 按比例收敛，**绝不要求放大**（AGENTS §12.7），
-    // 并向下对齐到 16×16 宏块（575 → 560，AGENTS §12.8：非对齐尺寸的流 MF 解不出来）。
-    expect(settingsOf(settings.single).bounds, const VideoSize(1280, 560));
+    // 并向下对齐到 16×16 宏块（§12.8：非对齐尺寸的流 MF 解不出来）。
+    // 先按设备比例（16:9）把视口收成 1516x853 的框，再收到原生范围内 → 1280x720。
+    expect(settingsOf(settings.single).bounds, const VideoSize(1280, 720));
 
     // 初始信息头再来（服务端重发很常见）也不该再发第二条。
     transport.emit(loadInitialInfoFixture());
@@ -179,8 +180,8 @@ void main() {
     );
     expect(
       first.bounds,
-      const VideoSize(1280, 656),
-      reason: '等不到 UI 尺寸时用服务端给的值，但仍要收敛到原生范围内（不放大）+ 16 对齐',
+      const VideoSize(1280, 720),
+      reason: '等不到 UI 尺寸时用服务端给的值，但仍要收敛到原生范围内（不放大）+ 同设备比例 + 16 对齐',
     );
 
     // UI 布局好了，报上真实视口：这时才补一条（这是正常的"尺寸变化"路径）。
@@ -190,7 +191,7 @@ void main() {
     );
     expect(settings, hasLength(2));
     // 同样收敛到原生范围内 + 16 对齐（不放大，AGENTS §12.7/§12.8）。
-    expect(settingsOf(settings.last).bounds, const VideoSize(1280, 560));
+    expect(settingsOf(settings.last).bounds, const VideoSize(1280, 720));
   });
 
   test('重复收到初始信息头时只下发一次视频参数（防反馈循环）', () async {
@@ -354,8 +355,9 @@ void main() {
       ControlMessageType.changeStreamParameters.code,
     );
     expect(settings, hasLength(1));
-    // 100x100 不是 16 的整数倍 → 向下对齐成 96x96（宏块对齐，见 §12.8）。
-    expect(settingsOf(settings.single).bounds, const VideoSize(96, 96));
+    // 100x100 不是设备比例（16:9），也不是 16 的整数倍：
+    // 先按设备比例收成 100x56.25，再向下对齐成 96x48（宏块对齐，见 §12.8）。
+    expect(settingsOf(settings.single).bounds, const VideoSize(96, 48));
   });
 
   test('编码边界一律向下对齐到 16 宏块：非对齐尺寸的流解码器解不出来', () {
@@ -368,16 +370,16 @@ void main() {
         viewport: const VideoSize(1898, 853),
         native: native,
       ),
-      const VideoSize(1280, 560),
-      reason: '等比收敛 1280x575 之后再向下对齐到 560',
+      const VideoSize(1280, 720),
+      reason: '先按设备比例收框（1516x853）再收到原生范围内 → 正好原生满分辨率，且 16 对齐',
     );
     expect(
       StreamSessionService.clampBoundsToNative(
         viewport: const VideoSize(999, 601),
         native: native,
       ),
-      const VideoSize(992, 592),
-      reason: '视口 ≤ 原生：保持不放大，但仍要对齐',
+      const VideoSize(992, 560),
+      reason: '视口 ≤ 原生：保持不放大，但仍要按设备比例收框并对齐',
     );
     expect(
       StreamSessionService.clampBoundsToNative(

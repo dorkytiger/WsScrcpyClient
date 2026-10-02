@@ -12,6 +12,7 @@ import 'package:ws_scrcpy_client/core/state/async_state.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/input/keyboard_mapping.dart';
+import 'package:ws_scrcpy_client/feature/stream/application/input/touch_pointer_tracker.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
@@ -40,12 +41,17 @@ class PlayerViewModel extends ChangeNotifier {
 
   /// 输入链路诊断（用户报告的"点一次触发两次 / 总差上一次"靠这几条定性）。
   final AppLogger _inputLogger = AppLogger('Input');
-  int _inputSequence = 0;  // 真正发出的事件序号（用来核对设备收到的顺序）
+
+  /// 触摸指针状态机：保证每个 DOWN 都有配对的 UP（黑边上丢掉 UP 会把设备端卡住，
+  /// 见 [TouchPointerTracker] 的注释）。
+  final TouchPointerTracker _touchTracker = TouchPointerTracker();
+
+  int _inputSequence = 0; // 真正发出的事件序号（用来核对设备收到的顺序）
   int _inputDownCount = 0;
   int _inputMoveCount = 0;
   int _inputUpCount = 0;
   int _inputDuplicateCount = 0;
-  int _inputRejectedCount = 0;  // 落在黑边上被丢弃的
+  int _inputRejectedCount = 0; // 落在黑边上被丢弃的
   DateTime? _inputWindowStart;
   String? _lastInputKey;
   DateTime? _lastInputAt;
@@ -87,11 +93,18 @@ class PlayerViewModel extends ChangeNotifier {
   /// 解码器错误（有值时 UI 应显示可读文案 + 重试入口）。
   GlobalException? get decoderError => _decoderError;
 
-  /// 当前平台是否支持原生解码（M2 路线 A：Android 用 MediaCodec，Windows 用 MF MFT）。
+  /// 当前平台是否支持原生解码（M2 路线 A）。
+  ///
+  /// - Android：`MediaCodec` → `SurfaceProducer`；
+  /// - Windows：Media Foundation H.264 解码器 MFT；
+  /// - iOS / macOS：VideoToolbox（`VTDecompressionSession` → `CVPixelBuffer` → `FlutterTexture`，
+  ///   两端共用同一份 `darwin/ScrcpyVideo*.swift`）。
   bool get isNativeDecodingSupported =>
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.windows);
+          defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.macOS);
 
   /// 是否正在等待解码器创建完成。
   bool get isDecoderCreating => _decoderCreating;
@@ -212,8 +225,27 @@ class PlayerViewModel extends ChangeNotifier {
       videoHeight: size.height,
       viewWidth: viewWidth,
       viewHeight: viewHeight,
+      // 渲染与触摸用同一个模式：改成"铺满"时两边一起变，否则点哪都偏。
+      fit: videoFitMode,
     );
     return viewport.isUsable ? viewport : null;
+  }
+
+  /// 画面填充方式（默认完整显示）。见 [VideoFitMode]。
+  VideoFitMode get videoFitMode => _videoFitMode;
+  VideoFitMode _videoFitMode = VideoFitMode.contain;
+
+  /// 切换"完整显示 / 铺满裁切"。
+  ///
+  /// 只影响**本地渲染与坐标换算**，不改任何编码参数——设备那边该编多少还是多少
+  /// （§12.7：绝不向设备要放大）。
+  void setVideoFitMode(VideoFitMode mode) {
+    if (_videoFitMode == mode) {
+      return;
+    }
+    _videoFitMode = mode;
+    _inputLogger.info('画面填充方式切到：${mode.label}（${mode.name}）');
+    _notify();
   }
 
   /// 每秒一条输入统计：把"到底点了多少次、发出多少条、丢了多少、重复了多少"变成数字。
@@ -261,7 +293,51 @@ class PlayerViewModel extends ChangeNotifier {
 
   /// 手势 → 触摸消息（M3）。
   ///
-  /// 坐标由调用方先用 [viewportFor] 换算成视频像素；落在黑边上时不会调用到这里。
+  /// 坐标由调用方先用 [viewportFor] 换算成视频像素；落在黑边上时**也要调到这里**
+  /// （`point == null`），由 [TouchPointerTracker] 决定是丢弃还是补一条 UP 释放。
+  ///
+  /// **不要**在视图层对"落在黑边"的事件直接 return —— 那样会把 UP 吃掉，
+  /// 设备端会一直认为那根手指按着，之后同一个 pointerId 的点按全失效
+  /// （2026-10-02 iOS 实测的"点几下就点不动了"）。
+  Result<void>? dispatchTouch({
+    required TouchAction action,
+    required int pointerId,
+    required VideoPoint? point,
+    int buttons = 0,
+  }) {
+    final plan = _touchTracker.handle(
+      action: action,
+      pointerId: pointerId,
+      point: point,
+    );
+    if (plan.isIgnored) {
+      _inputLogger.info(
+        '忽略 ${action.name} id=$pointerId：${plan.ignoredReason}',
+      );
+      return null;
+    }
+    Result<void>? last;
+    for (final step in plan.steps) {
+      if (step.action == TouchAction.up && plan.steps.length > 1) {
+        // 手指划到黑边上时补的这一条：单独记一条，排查"卡住"时一眼能看到。
+        _inputLogger.info('id=$pointerId 划出画面（黑边）→ 补一条 UP 释放，避免设备端手指卡住');
+      }
+      last = sendTouch(
+        action: step.action,
+        pointerId: pointerId,
+        x: step.point.x,
+        y: step.point.y,
+        pressure: step.action == TouchAction.up ? 0 : 1,
+        // 抬起时按键位归 0（与服务端网页端 `e.buttons` 在 mouseup 时为 0 一致）。
+        buttons: step.action == TouchAction.up ? 0 : buttons,
+      );
+    }
+    return last;
+  }
+
+  /// 手势 → 触摸消息（M3）的**底层发送**。
+  ///
+  /// 一般不要直接调它：先过 [dispatchTouch] 的 DOWN/UP 配对状态机。
   Result<void> sendTouch({
     required TouchAction action,
     required int pointerId,
@@ -396,6 +472,17 @@ class PlayerViewModel extends ChangeNotifier {
           )
         : AsyncSuccess<StreamSessionSnapshot>(snapshot);
     _notify();
+
+    // 连接不可用时清空指针状态：设备端要么已经换了会话、要么马上就要重连，
+    // 本地留着一堆"还按着"的假状态只会让下一轮点按全被当成重复 DOWN 丢掉。
+    // （断线时那根手指的 UP 本来就发不出去，也没必要补。）
+    if (!snapshot.status.isUsable && _touchTracker.activePointerCount > 0) {
+      _inputLogger.info(
+        '连接不可用（${snapshot.status.description}）：清空 '
+        '${_touchTracker.activePointerCount} 个未抬起的指针状态',
+      );
+      _touchTracker.reset();
+    }
 
     // 拿到 displayInfo（含真实分辨率）后就可以起解码器了。
     final display = snapshot.display;

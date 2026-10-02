@@ -19,8 +19,10 @@ ws-scrcpy 的多端客户端（Flutter）：把 ws-scrcpy 的安卓投流装进�
 | 真实服务端联调：拿到裸 H.264（SPS+PPS → IDR → P 帧） | ✅ 已实测 |
 | **画面解码与渲染（M2 路线 A：Android `MediaCodec` → Texture）** | ✅ 已实测可用（用户设备上确认过画面） |
 | **画面解码与渲染（M2 路线 A：Windows Media Foundation 解码器 MFT → NV12→RGBA → Texture）** | ✅ 已实机确认能出画面（2026-10-01）；黑屏/卡顿的根因与修法见 AGENTS §12.5 |
+| **画面解码与渲染（M2 路线 A：iOS / macOS VideoToolbox → `CVPixelBuffer` → `FlutterTexture`）** | ✅ 两端**共用同一份** `darwin/ScrcpyVideo*.swift`；都已实跑并**截图确认画面清晰上屏**（2026-10-02，见 AGENTS §15）。iOS **尚无真机验证** |
 | **视频参数下发对齐服务端网页端**：首发一条、带 UI 最终尺寸、逐字段回显服务端 `VideoSettings` | ✅（修掉了"连发两条 → 编码器重建两次 → 黑屏"） |
-| **M3 输入：触摸（多指）/ 滚轮 / 物理键盘（含 metaState）** | ✅ 已实现（坐标按视频像素换算，黑边上的触摸不转发；Windows 一旦有画面即可用） |
+| **M3 输入：触摸（多指）/ 滚轮 / 物理键盘（含 metaState）** | ✅ 已实现（坐标按视频像素换算，黑边上的触摸不转发）。iOS 上曾"点几下就点不动"，根因是**黑边上丢掉 UP 把设备端手指卡住**，已修并补了回归测试（AGENTS §9.1） |
+| **画面适配：完整显示 / 铺满裁切 + 横屏布局** | ✅ 横屏顶栏收起、快捷栏竖排贴右（画面 501×282 → ~715×402，**像素 +104%**，不裁切不变形）；"铺满"可把 16:9 的设备画面填满 3:1 的横屏画面区（代价：裁掉上下边缘）。见 AGENTS §9.2 |
 | 可选：连接后自动唤醒被控设备（`KEYCODE_WAKEUP`） | ✅ 默认**关**；它是给"设备屏幕休眠不出帧"留的开关，**不是**黑屏的修复 |
 | 运行期诊断：原生日志（毫秒时间戳 + pid）、每秒心跳、`帧间隔` vs `平均处理`、帧计数 | ✅ 见 AGENTS §12.2 |
 | M3 余项：剪贴板同步、软键盘文本注入、双指缩放 | ⏳ |
@@ -31,14 +33,27 @@ ws-scrcpy 的多端客户端（Flutter）：把 ws-scrcpy 的安卓投流装进�
 # 依赖
 dart pub get
 
-# 静态检查 + 单元测试（206 项，1 项按平台跳过）
+# 静态检查 + 单元测试（241 项，1 项按平台跳过）
 dart analyze lib test tools
 flutter test
 
 # 运行
 flutter run -d <android-device-id>   # 手机
 flutter run -d windows               # Windows 桌面
+flutter run -d macos                 # macOS 桌面
+flutter run -d <ios-simulator-id>    # iOS（需要 macOS + Xcode + CocoaPods）
 ```
+
+### Apple 两端（iOS / macOS）构建/运行注意
+
+- **必须先装 CocoaPods**（`brew install cocoapods`）：`flutter_secure_storage` 还不支持
+  Swift Package Manager，Flutter 会对它回退到 CocoaPods；没装时 `flutter build ios` 直接失败。
+- 编译：`flutter build ios --debug --no-codesign`（真机才需要签名）/ `flutter build macos --debug`。
+- **iOS 与 macOS 共用 `darwin/` 下的三个 Swift 文件**（解码器 / 纹理 / 通道），
+  两个 Xcode 工程都用 `path = ../darwin` 的分组引用它们——改一处两端同时生效。
+- **离线验证解码器**（不需要设备与服务端，链接的是真实的 Swift 解码器）：
+  `tools/run_vt_replay_probe.sh` —— 当前 **27 项检查 0 失败**。
+- 自动化联调与截图、原生日志读法见 [AGENTS.md](AGENTS.md) §3.3、§15、§15.8。
 
 首次启动会先进入**连接配置表单**：填写 ws-scrcpy 服务入口（服务端开了 Basic Auth 时再填账号密码），
 保存后进入设备列表。配置存在本机 drift(SQLite) 数据库里，密码写入系统安全存储，
@@ -49,7 +64,7 @@ flutter run -d windows               # Windows 桌面
 | 按钮 | 行为 |
 |---|---|
 | **网页** | 用 WebView 打开该设备的网页版投流页（深链直达画面：`#!action=stream&udid=…&player=mse&ws=…`），带 Basic Auth 质询应答 |
-| **投流** | 走原生协议通道：连接/初始头/视频参数/重连 + **原生解码渲染画面**（Android `MediaCodec`、Windows Media Foundation → Flutter `Texture`），触摸/滚轮/键盘直接可用 |
+| **投流** | 走原生协议通道：连接/初始头/视频参数/重连 + **原生解码渲染画面**（Android `MediaCodec`、Windows Media Foundation、iOS/macOS VideoToolbox → Flutter `Texture`），触摸/滚轮/键盘直接可用 |
 
 ### Windows 构建/运行注意
 
@@ -91,13 +106,17 @@ lib/
     └── shell/     M1 WebView 壳
 docs/            协议实测记录
 tools/probe.dart M0 协议探测脚本
+darwin/          iOS / macOS 共用的原生解码（两个 Xcode 工程都引用它）
 ```
 
 ## 下一步
 
-- **Windows 原生解码的实机复验**：链路与代码已就绪（见 [AGENTS.md](AGENTS.md) §12），
-  但本机没有设备与真实服务端，画面/色彩/性能都还没在真机上跑过；首跑重点看
-  是否有画面、红蓝是否颠倒、旋转后分辨率是否跟着变、CPU 占用。
+- **iOS 真机复验**：代码、构建、模拟器截图（画面清晰上屏）都已完成（见 [AGENTS.md](AGENTS.md) §15），
+  但**还没上过真机**——差签名/provisioning；真机验收清单在 §15.6。
+  另外 `NSAllowsLocalNetworking` 与本地网络权限这两条在真机上到底会不会拦，也还没实测。
+- **触摸的遗留问题**：iOS 模拟器上"点画面中间没反应"（快捷栏按钮是好的）。
+  已经排除报文格式/坐标语义/`Listener` 接线（见 AGENTS §9.1），下一步用服务端**网页播放器**
+  做对照实验定位是客户端还是被控端（`redroid` 容器可能不接受注入触摸）。
 - **Linux 原生解码**：桌面端暂时只能走设备卡片的"网页"入口。
 - M3 余项：剪贴板同步、软键盘文本注入、双指缩放等手势增强。
 - 若选 fMP4 重封装路线，需要先抓一次 `sendFrameMeta=true` 的报文（每帧前 12 字节帧信息），

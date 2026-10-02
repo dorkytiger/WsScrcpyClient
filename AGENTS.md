@@ -21,12 +21,18 @@ ws-scrcpy 的**多端显示/操作客户端**（Flutter）。需求与里程碑�
   **已实机确认能出画面**（2026-10-01 用户确认）；此前的崩溃/黑屏/卡顿/"270 帧只解出 1~2 帧"
   的根因与修法见 §12.1 / §12.4 / §12.5 / §12.6（全文在 `docs/windows-decoder-history.md`）
 - ✅ M3 核心输入：触摸（多指）/ 滚轮 / 物理键盘（含修饰键 metaState）
+- ✅ M2 路线 A：**iOS / macOS** 原生硬解（VideoToolbox `VTDecompressionSession` → `CVPixelBuffer` →
+  `FlutterTexture`；两端**共用同一份** `darwin/ScrcpyVideo*.swift`）。
+  两端都已实跑并**自己截图确认画面上屏**（iOS 模拟器 2026-10-02；macOS 本机同日、用户也验过），见 **§15**
+- ⏳ M2 路线 A：Linux 原生解码
 - ⏳ M3 余项：剪贴板同步、软键盘文本注入、双指缩放等手势增强
 
 ### 1.1 交接：当前状态与下一步（新会话从这里读起）
 
 **能用了**：设备列表 → 投流 → Windows 原生解码 → 画面 + 触摸/滚轮/键盘输入。
 Android 端同样可用（MediaCodec 路线）。真机日志验证过 `已发布 332/370 帧`、`ProcessOutput 失败 0`。
+**iOS 端（2026-10-02）也能用了**：VideoToolbox 路线，已在 iOS 模拟器上连真实服务端截图确认
+画面清晰上屏（`1184x672`、`已喂入 12 / 已解出 12`、`丢弃 0`）——见 §15。
 
 **当前状态（2026-10-01 真机第四轮后）**：
 1. ★ **`MF_LOW_LATENCY` 是"全黑 + 时不时卡几秒"的根因与修法**（见 §12.8 末尾）——
@@ -40,8 +46,8 @@ Android 端同样可用（MediaCodec 路线）。真机日志验证过 `已发�
 **上屏问题必须自己截图确认**；② 排查要有"自己的眼睛和手"：`WS_SCRCPY_AUTOSTART=1` 自动投流 +
 运行中可读的日志/抓包，让我能自己复现，不必让用户反复当测试机。
 
-**已知未做**：Mac/Linux 原生解码（macOS/iOS 可行性见 `docs/platform-feasibility.md`，
-macOS 的 `network.client` entitlement 已补）；剪贴板同步、软键盘文本注入、双指缩放；
+**已知未做**：Linux 原生解码；**iOS 只在模拟器上验证过、还没上真机**（要过签名，见 §15.6）；
+剪贴板同步、软键盘文本注入、双指缩放；
 `sendFrameMeta=true` 未验证；应用标识仍是 `com.example`。
 
 **这个仓库以前没有 git**（`fatal: not a git repository`）：2026-10-01 已 `git init` 并做首次提交
@@ -60,7 +66,7 @@ macOS 的 `network.client` entitlement 已补）；剪贴板同步、软键盘�
 | 平台 | 解码器 | 必须做的事 | 不做的后果 |
 |---|---|---|---|
 | **Windows** | Media Foundation H.264 解码器 MFT | 创建后、开始流**之前**：`IMFAttributes::SetUINT32(MF_LOW_LATENCY, TRUE)` | **默认缓冲约 1.2 秒（30fps ≈ 38 帧）才吐第一张图**：画面静止时服务端只给二十来帧 → **永远黑屏**；编码器一重建就再攒一批 → **隔几秒卡一下然后一次性追平** |
-| **macOS / iOS** | VideoToolbox（`VTDecompressionSession`） | **`kVTDecompressionPropertyKey_RealTime = true`**（同理还有 `kVTDecompressionPropertyKey_MaximizePowerEfficiency=false`、以及用 `AVSampleBufferDisplayLayer` 时设 `lowLatency`/必要时 `requiresFlushToResumeDecoding=false`） | 同样会攒帧：表现为首帧慢、画面滞后、静止时不出画 |
+| **macOS / iOS** | VideoToolbox（`VTDecompressionSession`） | **`kVTDecompressionPropertyKey_RealTime = true`**。**不要**顺手设 `kVTDecompressionPropertyKey_MaximizePowerEfficiency`——头文件原文写着"两者同设是未定义行为"，而它默认就是 false，不设才对（可行性文档 §3.1.4 那条建议与头文件冲突，已纠正）。 | **实测（iOS 2026-10-02）：Apple 侧没有 Windows 那种缓冲**——`RealTime` 默认就是 true，探针跑 true / false / 完全不设三种都是 90/90 帧全解（`tools/run_vt_replay_probe.sh`）。但仍要显式设一次并记返回码，日志里能自证 |
 | Android（已实现） | `MediaCodec` | 已经是实时模式（SurfaceProducer），**无需改** | — |
 
 **判断方法（不依赖肉眼）**：看心跳里 `已发布 / 已喂入` 的比例。
@@ -70,9 +76,15 @@ macOS 的 `network.client` entitlement 已补）；剪贴板同步、软键盘�
 **离线验证入口**：`tools\run_mft_replay_probe.cmd [抓包]` 会同时打印"不设 / 设低延迟"两种结果，
 谁把这里改坏会立刻暴露（抓包用 `WS_CAPTURE_FRAMES` 或 exe 同目录放 `ws_capture.txt`）。
 
-**macOS 现状**：原生解码**还没实现**（桌面端可先用设备卡片的"网页"入口）；
-可行性见 `docs/platform-feasibility.md`，macOS 的 `network.client` entitlement 已补。
-在 Mac 上实现时请照上表第一列之外的两点做，并**第一件事就是截图确认画面**。
+**macOS 现状（2026-10-02 已完成，细节见 §15）**：`darwin/` 里那份 VideoToolbox 代码两端共用，
+macOS 侧**只写了注册那一层**（`macos/Runner/MainFlutterWindow.swift`，见 §15.8）。
+本机实跑 + 自己截图确认画面上屏；用户也试过。**注册纹理走的是一条就成**：
+`flutterViewController.registrar(forPlugin:).textures`（不像 iOS 那条要兜底，见 §15.3）。
+
+**iOS 现状（2026-10-02 已完成，细节见 §15）**：这一端额外踩到两个和 Windows 不同类的坑：
+① **`applicationRegistrar.textures()` 注册纹理返回 0**（隐式引擎 + Scene 生命周期下那个 relay 的
+parent 是 weak，还没接上宿主视图）→ 必须退到 `FlutterViewController` 注册，见 §15.3；
+② **`NSLog` 进不了 `flutter run` 的控制台** → 必须同时 `print`，见 §15.4。
 
 ---
 
@@ -166,6 +178,48 @@ tools\run_windows.cmd          # 等价于：TEMP/TMP→.tmp\ + --dart-define=WS
 - `WS_DATA_DIR` 让 drift 数据库落到工作区（见 `lib/core/database/app_database.dart`）；
 - 密码仍走系统安全存储；它在受限环境写不进去时会降级为"仅本次会话有效"并在界面提示；
 - 构建（`flutter build windows`）**不受这些限制影响**，见 §3.1。
+
+
+### 3.3 macOS 上做 iOS（本次新增）
+
+Windows 那套 `.cmd` 在这里用不了；macOS 上的对应命令：
+
+```bash
+export PATH="/opt/homebrew/bin:$HOME/Dev/flutter/bin:$PATH"   # pod 在 homebrew 里
+
+flutter pub get
+dart analyze lib test tools
+flutter test
+
+# iOS 编译（不需要签名；真机才需要）
+flutter build ios --debug --no-codesign
+
+# 在模拟器上自动投流 + 自己截图（凭据只走命令行，不落仓库文件）
+flutter run -d <simulator-udid> \
+  --dart-define=WS_BOOTSTRAP_URL=https://<服务端>/ \
+  --dart-define=WS_BOOTSTRAP_USER=<用户名> \
+  --dart-define=WS_BOOTSTRAP_PASSWORD=<密码> \
+  --dart-define=WS_SCRCPY_AUTOSTART=1
+xcrun simctl io booted screenshot shot.png     # ← 上屏必须自己截图确认
+xcrun simctl spawn booted log show --last 3m \
+  --predicate 'eventMessage CONTAINS "ScrcpyVideo"' --style compact   # 原生日志
+
+# VideoToolbox 离线探针（不需要设备/服务端，链接真实解码器）
+tools/run_vt_replay_probe.sh
+```
+
+**三条 macOS 特有的注意点**：
+
+1. **CocoaPods 必须装**（`brew install cocoapods`）：`flutter_secure_storage` 还不支持
+   Swift Package Manager，Flutter 会对它回退到 CocoaPods；没有 pod 时
+   `flutter build ios` 直接以 `CocoaPods not installed or not in valid state` 结束。
+   其余插件走 Flutter 3.47 默认开启的 SPM（`ios/Flutter/ephemeral/Packages/`）。
+2. **`WS_BOOTSTRAP_*` 是本次为"能自动跑"加的**（`lib/core/debug/debug_bootstrap.dart`）：
+   `WS_SCRCPY_AUTOSTART` 读的是 `Platform.environment`，而 iOS 应用进程**拿不到宿主环境变量**，
+   所以这条必须走 `--dart-define`。模拟器上也没法可靠地手填首次进入的表单，没有它就没法自动化验证。
+   **默认关闭**（不传 `WS_BOOTSTRAP_URL` 时什么都不做）。
+3. **`--dart-define` 的值会被编进产物**（`kernel_blob.bin` / `app.dill`）。用真实密码跑完记得
+   `rm -rf build .dart_tool/flutter_build`，别把带凭据的构建产物留在盘上。
 
 
 ---
@@ -293,10 +347,163 @@ feature 之间**不互相 import presentation/data**。
 排查顺序：先查自己的请求时序，再看服务端；判断"有没有流"要看**单位时间收到的字节数**，
 只看"有没有视频帧"会被循环刷包骗过。详见 `docs/ws-scrcpy-protocol.md` §6.2。
 
-**待做**：macOS / Linux 的原生解码（Windows 已跑通，做法见 §1.2 与 §12.8）；
+**待做**：**Linux** 的原生解码（Windows / Android / iOS / macOS 都已跑通）；
+**iOS 只在模拟器上验证过，还没上真机**（真机要过签名，见 §15.6）；
 M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TYPE_TEXT`、双指缩放等手势）；
 `sendFrameMeta=true` 时每帧前 12 字节帧信息未验证（改走 fMP4 重封装才需要）；
 应用标识仍是 `flutter create` 默认的 `com.example`（`android/`、`ios/`、`windows/runner/` 三处）。
+
+---
+
+### 9.1 ★ 触摸"点几下就点不回去了"：**黑边上丢掉 UP，把设备端的手指卡住了**（已修）
+
+**用户的两次描述**：
+① "似乎现在只能触控主页返回这些，中间屏幕内容点不了"；
+② "**滑动几下**，或者点击安卓任务窗口，再点击里面的任务……**一开始可能可以，试几次就点不回去了**"。
+③ 补了一条决定性的：**macOS 上没问题，只有 iOS 有问题**。
+
+**②③ 两条合起来基本就把范围锁死了**，因为：
+
+- 设备端（`scrcpy-server` → Android `InputDispatcher`）是**按 `pointerId` 记**"这根手指是否还按着"的。
+  只要有一根手指只收到 `DOWN`、没收到 `UP`，设备就**一直认为它按着**；
+  之后**复用同一个 pointerId** 的 `DOWN` 会被直接丢弃 —— 而 Flutter 会反复复用同一批 id，
+  于是**所有单指操作**都失效，看起来就是"点不动了"。（这就是"一开始可以、几次之后不行"的签名；
+  如果是报文/坐标错，会**从第一次就稳定失败**。）
+- **只有 iOS 够得着这个 bug**：`_VideoStage` 的 `Listener` 铺满整个控件，而视图层原来对
+  "落在黑边上"的事件**一律不转发**（`point == null` 就 `return`）——**UP 也一起被吃掉**。
+  - macOS：窗口是宽的 → 画面铺满宽度、上下黑边只有十几像素 → 滑动几乎不会滑出去 → **碰不到**；
+  - iOS 竖屏：画面只占控件高度约 **1/3**（1184x672 的画面装进 402x664 的控件里只有 ~228 高）
+    → **滑动几乎必然滑出画面** → 必现。
+  用户说的"滑动几下"正是最容易触发的动作，而"点任务窗口里的任务"也常常点到画面边缘。
+
+**修法**（两处，都在共享 Dart 层，因此 Android / Windows 同样受益）：
+
+1. 新增 `lib/feature/stream/application/input/touch_pointer_tracker.dart`——
+   **DOWN/UP 配对状态机**，规则逐条对照服务端网页端的 `buildTouchOnClient` + `validateMessage`：
+   - `DOWN`：该 id 已按下 → 丢弃（重复 DOWN 会让设备多按一根手指）；落黑边 → 丢弃（没成立）；
+   - `MOVE`：该 id 没按下 → 丢弃（**不**像网页端那样补一条"模拟 DOWN"，凭空造点击更糟）；
+     落黑边 → **补一条 UP 释放**（网页端也是这么做的）；
+   - `UP`/`CANCEL`：没按下 → 丢弃；否则**一定发出**，落黑边就用**最后一次有效坐标**兜底，
+     **绝不因为落点不合法而吃掉 UP**。
+2. `_VideoStage._sendTouch` 不再对 "`point == null`" 直接 `return`，而是把 `null` 交给状态机；
+   断线时 `PlayerViewModel` 清空指针状态（重连后设备端是干净会话，本地陈旧状态只会误判）。
+
+**回归测试（两个层次，都验证过"改回老代码就变红"）**：
+
+- `test/feature/stream/touch_pointer_tracker_test.dart`：9 条纯逻辑用例，含
+  "按下在画面内、抬起落黑边 → 仍要发 UP"、"MOVE 滑出画面 → 立刻补 UP"、
+  "连续 N 次点按之后仍能发 DOWN"；
+- `player_page_test.dart`：两条**真手势**端到端用例（`startGesture` + `moveTo` 到画面外），
+  断言"消息序列里 DOWN 与 UP 必须一一配对"。**把 `_sendTouch` 改回老的"遇黑边就 return"，
+  这两条立刻失败**——这就是它们能当门禁的证据。
+
+**留给真机的验收**（iOS 上我这边没有辅助访问权限，点不了模拟器，所以这条靠你复验）：
+
+1. 在投流页**反复滑动**（故意划过黑边），然后点画面里的内容 —— 应该一直有点；
+2. 走一遍原路径：快捷栏"最近" → 出现的任务窗口里点一个任务 —— 应该能切回去；
+3. 如果**仍然**点不动，那说明 `buttons` 那条也成立：服务端对**触摸事件**固定发
+   `buttons = BUTTON_PRIMARY(1)`（`formatTouchEvent` 里写死的），而我们对非鼠标指针发 `0`。
+   这条当时没验证（属于"要用实验判定"而不是"靠读代码判定"），是下一个候选。
+
+**仍然排除掉的（都有依据，别再查一遍）**：
+
+- **报文格式没问题**：把服务端 `bundle.js` 拉下来对比过，它的 `TouchControlMessage.toBuffer()`
+  与我们的 `lib/core/control/touch_control_message.dart` **逐字节一致**
+  （含 `writeUInt32BE(0)` 那个 pointerId 高位、29 字节里偏移 28 的零填充）；
+- **`screenSize` 语义没问题**：服务端 `buildTouchOnClient()` 里 `new ScreenSize(n, o)` 用的就是
+  **视频尺寸**，坐标也是按 contain 换算成视频像素——与我们的 `VideoViewport` + `PlayerViewModel.sendTouch`
+  （`screenWidth/Height = _videoSize`）完全同构；
+- **`Listener` 接线没问题**：`_VideoStage` 用 `HitTestBehavior.opaque` 包住画面，
+  且"点画面正中 → 发出 `type=2` 触摸消息、坐标为视频中心"的用例一直是过的；
+- 快捷栏能通 ⇒ 连接、控制消息通道、`sendControlMessage` 都正常。
+
+**教训**：这类"**只在某个平台、某个窗口形状下出现**"的问题，第一件该看的是
+"**两个平台之间哪个输入条件不一样**"——这里是**黑边占控件的比例**（macOS ~2% vs iOS ~66%）。
+用户那句"macOS 没问题、只有 iOS 有问题"是整轮排查里信息量最大的一句。
+
+---
+
+### 9.2 ★ 画面适配与横屏布局（2026-10-02，用户看到横屏截图后要求改）
+
+**用户原话**："现在触屏没啥问题了，但是横屏布局要改一下，而且这个设备大小，不能更改是吗，
+就是做不到设备屏幕自适应"。
+
+#### 先把"自适应"说清楚：两件事，只有一件真做不到
+
+| | 能不能 | 为什么 |
+|---|---|---|
+| 改**被控设备**的显示分辨率 | ❌ | 1280x720 是 redroid 容器的显示设置，客户端改不了。而且我们**故意**不向设备要更大的编码尺寸——`clampBoundsToNative` 把 `bounds` 卡在原生以内，让容器里的软编码器放大编码正是 Windows 那轮"卡成幻灯片"的根因（§12.7）。**能要的只有"更小"，那只会更糊。** |
+| 改**本地显示**方式 | ✅ | 见下面两种填充模式 |
+
+**黑边是怎么来的**：设备是 **16:9**，iPhone 18 Pro **横屏**去掉顶栏（56）和快捷栏（64）后
+画面区只有 **874x282 ≈ 3.1:1**。按比例装进去 → 高度顶满，宽度只用 **501/874**，
+左右各 **186** 的黑边 —— **43% 的宽度是浪费的**。这是比例失配的必然结果，不是 bug。
+
+#### 两个改动（用户选的"A + B 都做"）
+
+**A. 横屏布局：把浪费的横向空间换成画面的高度**
+
+原来横屏也是"顶栏 + 底部快捷栏"，402 点里被 UI 吃掉 **120 点（30%）**。现在：
+
+```
+横屏：Row[ Expanded(Stack[画面, 顶栏浮层]), 竖排快捷栏 ]   ← 顶栏默认收起
+竖屏：Scaffold(appBar) + Column[画面, 横排快捷栏]            ← 原样不动
+```
+
+画面从 **501x282** 变成约 **715x402**（高度撑满）——**像素 +104%，而且不裁切、不变形**。
+实测断言：`player_page_test.dart` 里"横屏…画面撑满可用高度"要求
+`videoRect.height > 屏幕高度 * 0.9`。
+
+**顶栏为什么不是"点画面唤出"**：画面上的点击是**要发给被控设备的**，
+同一个手势不能既操作远端又开关本地 UI。所以留了一个**常驻半透明小圆钮**（左上角）唤出，
+顶栏本身是浮层（盖在画面上），收起后一点高度都不占。
+
+**B. "铺满"显示模式（`VideoFitMode`：contain / cover）**
+
+- 只影响**本地渲染与坐标换算**，**不改任何编码参数**（设备那边该编多少还是多少）。
+- **渲染与触摸必须是同一套变换**：画面改成 `FittedBox(fit: contain/cover)` 画，
+  坐标换算用 `VideoViewport(fit:)` 算，两边的比例都来自 `videoSize`——
+  以前渲染是手写 `AspectRatio`、换算是另一份公式，**一旦加 cover 就会两边不一致、点哪都偏**。
+- cover 的几何：`scale` 取**较大**的比例、`offsetX/Y` 变**负数**（画面比控件大），
+  `contains()` 恒真（被裁掉的部分只是"点不到"，不是"点位非法"）。
+- 入口两处：横屏顶栏里的图标按钮 + **"更多"面板里的"铺满屏幕"开关**（竖屏时唯一入口）。
+
+#### ★ 溢出：真机截图里那条 `BOTTOM OVERFLOWED BY 3.9 PIXELS`
+
+**横屏下溢出的是两处**，都修了：
+
+1. **"更多"面板**：`showModalBottomSheet` 默认把高度压到屏幕的 **9/16**，
+   面板里的固定内容（标题 + 两行开关 + 分割线 + 断开按钮）超了，
+   里面那层 `Flexible + SingleChildScrollView` 兜不住。
+   → 改成 `isScrollControlled: true` + **整个面板一层滚动**（永远不可能溢出）。
+2. **画面占位**（`_VideoPlaceholder`）：AppBar + 快捷栏之后只剩 ~280 点，装不下那堆状态文案
+   —— **真机首帧到达前就能看到**。→ 改成"放得下居中、放不下滚动"
+   （`LayoutBuilder` + `SingleChildScrollView` + `ConstrainedBox(minHeight)`）。
+
+**★ 默认的 800x600 测试画布测不出这类 bug，必须显式把画布摆成横屏手机**
+（`874x402`、DPR 3，并且**要加底部安全区** `FakeViewPadding(bottom: 21*3)`，
+否则面板那条复现不出来）。两条回归测试都做过 A/B：**改回老结构 → 红，修复版 → 绿**。
+（占位那条老代码溢出 28px；面板那条只有加上安全区才复现。）
+
+#### macOS 上自动化验证的一个坑（和产品无关，但会浪费你半小时）
+
+`flutter run/build` 出来的 macOS debug 包是 **ad-hoc 签名**，**每次重建签名都会变**，
+Keychain 的 ACL 就对不上了 → `flutter_secure_storage` 写不进去（按 §7 的设计**不报错**，
+密码只留在内存），于是**下一次启动** `ensureProfile` 看到"已有配置"就不覆盖（它的设计是
+"不覆盖用户自己填的东西"）→ 没有密码 → **设备列表报"握手被拒绝"**，
+而 `curl -u` 却是 **200**。
+
+**排查时先记住这一条**：这不是服务端/凭据的问题，删掉应用数据目录再跑即可：
+
+```bash
+rm -rf "$HOME/Library/Application Support/com.example.wsScrcpyClient"
+```
+
+另外**别指望用 `defaults write … "NSWindow Frame MainFlutterWindow"` 来改 macOS 窗口尺寸**
+验证横屏布局——实测不生效（那个窗口没有 autosave name）。要肉眼看横屏，最省事的是
+在 iPhone 模拟器里横过来（但 Xcode 27 的模拟器 UI 换成了 **DeviceHub**，
+它不开可被 AppleScript 驱动的窗口，且 `osascript` 没有辅助访问权限时点不了）。
+**结论：横屏布局靠 widget 测试里量几何（画面高度 / 快捷栏位置）来兜，别硬凑截图。**
 
 ---
 
@@ -304,9 +511,11 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 
 ```
 手势/键盘 ──► _VideoStage（Listener/Focus）
-                │  坐标用 VideoViewport 换算成视频像素（黑边上的点直接忽略）
+                │  坐标用 VideoViewport 换算成视频像素（黑边上的点记作 null）
                 ▼
-        PlayerViewModel.sendTouch / sendScroll / handleKeyEvent
+        PlayerViewModel.dispatchTouch（TouchPointerTracker：DOWN/UP 配对）
+                ▼
+        PlayerViewModel.sendTouch（底层发送）
                 ▼
         StreamSessionService.sendTouch / sendScroll / sendControlMessage
                 ▼
@@ -314,8 +523,11 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 ```
 
 - **坐标换算**（`video_viewport.dart`）：画面按 contain 居中，先算 `scale = min(view/video)`、
-  再减黑边偏移，最后 `round()` 并 clamp 到 `[0, w-1]`；落在黑边上返回 null、
-  不发送——投过去设备就会点到他不想点的地方。
+  再减黑边偏移，最后 `round()` 并 clamp 到 `[0, w-1]`；落在黑边上返回 null。
+- **★ 配对状态机**（`touch_pointer_tracker.dart`）：落在黑边上**不等于**"这条事件可以丢"——
+  `DOWN` 可以丢（这次按下没成立），但**已经按下的指针的 `UP` 一定要发出去**，
+  否则设备端会一直认为那根手指按着，之后复用同一个 `pointerId` 的 DOWN 全被丢弃。
+  详见 **§9.1**（这就是"点几下就点不回去了"的根因）。
 - **触摸**：`Listener` 的 down/move/up/cancel → `TouchAction`；
   `pointerId` 直接用 Flutter 的 `event.pointer`（连接内唯一即可），因此天然支持多指；
   `ACTION_UP` 强制把压力置 0；鼠标事件额外带 `AndroidMotionEventButtons.primary`。
@@ -325,8 +537,9 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
   方向/确认/回车/退格/删除/Tab/空格/Esc/F1..F12），修饰键合成 `metaState`；
   **没覆盖的键返回 null 直接忽略**，绝不猜一个 keycode 发过去。
 - 单测：`test/feature/stream/video_viewport_test.dart`（含横屏/竖屏/极端宽高比/黑边）、
-  `keyboard_mapping_test.dart`、以及 `player_page_test.dart` 里"点画面正中 → 发出
-  `type=2` 的触摸消息、坐标为视频中心、抬手压力为 0"的端到端断言。
+  `keyboard_mapping_test.dart`、`touch_pointer_tracker_test.dart`（DOWN/UP 配对，9 条）、
+  以及 `player_page_test.dart` 里"点画面正中 → 发出 `type=2` 的触摸消息、坐标为视频中心、
+  抬手压力为 0"与两条"真手势滑出画面后 DOWN/UP 仍成对"的端到端断言。
 
 ---
 
@@ -658,9 +871,13 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
 
 **实现**（`lib/feature/stream/application/service/stream_session_service.dart`）
 
-- `clampBoundsToNative({viewport, native})`：`scale = min(1, min(native.w/viewport.w, native.h/viewport.h))`，
-  按比例收敛到原生范围内；视口本来 ≤ 原生时**保持不动**（也不上抬到原生，避免白烧编码）。
+- `clampBoundsToNative({viewport, native})`：**三步**——① 先把视口按**设备宽高比**收成框；
+  ② `scale = min(1, min(native.w/框宽, native.h/框高))` 收敛到原生范围内；③ 向下对齐 16 宏块。
   `native` 来自初始信息头的 `displayInfo.size`。
+  ⚠️ **第 ① 步是 2026-10-02 补的**（iOS 实测"画面糊"的根因）：服务端是"把画面按比例**装进**
+  这个框"，框的比例跟设备不一致时紧的那一边会把分辨率压死——竖屏视口 1206x1992 对横屏设备
+  1280x720，只做等比缩放得到 432x720 的竖框 → 服务端装进去只剩 **432x240**。
+  **详见 §15.7**（含回归测试）。
 - `_sendVideoSettings(...)` 里对 `bounds ?? base.bounds` 一律过一遍它——注意**服务端自己给的
   `bounds` 也可能大于原生**（夹具里是 `1856x960`），所以两条来源都要收敛；收敛时打日志说明。
 - 单测：`test/feature/stream/stream_session_service_test.dart` 覆盖
@@ -833,7 +1050,13 @@ COMMAND_DRAIN       ：首帧第 1 帧但之后不再产出（drain 后必须 fl
 
 ---
 
-## 13. 在 macOS 上继续开发（Windows 已跑通，Mac 从这一节读起）
+## 13. macOS 端（2026-10-02 已完成 —— 这一节保留为"当时怎么规划的"）
+
+> **结论先看**：macOS 原生解码**已经实现并实跑确认**，细节见 **§15.8**。
+> 实际做法与下面的规划基本一致，唯一重要的偏差是：
+> **共享的是 `darwin/ScrcpyVideo*.swift` 三个文件（含通道与纹理），不是只有解码器**——
+> 因为通道逻辑两端只差"从哪拿纹理注册表"，复制一份就违反"不维护第二份业务逻辑"。
+> 下面这段是实施前的规划，留着说明思路来源，**以 §15.8 为准**。
 
 **平台无关的部分直接照用，不用改**：协议层、投流会话、输入映射、UI、
 以及 `NativeVideoDecoder` 的 MethodChannel 契约（`ws_scrcpy/video` 的
@@ -841,24 +1064,10 @@ COMMAND_DRAIN       ：首帧第 1 帧但之后不再产出（drain 后必须 fl
 Dart 侧已经按平台分支，见 `lib/feature/stream/data/remote/native_video_decoder.dart`。
 
 **Dart 侧唯一要改的一处**：`lib/feature/stream/presentation/viewmodel/player_viewmodel.dart`
-（约第 93 行）目前只放行 `TargetPlatform.android` / `TargetPlatform.windows`，把 macOS 加进去。
+的 `isNativeDecodingSupported` 加上 `macOS`（已完成）。
 
-**原生侧照 Windows 的结构一一对应**：
-
-| Windows（已实现） | macOS 对应物 |
-|---|---|
-| `windows/runner/scrcpy_video_decoder.{h,cpp}` | 新建 `macos/Runner/ScrcpyVideoDecoder.swift` |
-| `flutter_window.cpp` 里注册通道 | `macos/Runner/MainFlutterWindow.swift` 里注册**同一个通道名** |
-| MF H.264 解码器 MFT | **VideoToolbox `VTDecompressionSession`** |
-| `MF_LOW_LATENCY`（§1.2，最容易漏） | **`kVTDecompressionPropertyKey_RealTime = true`** |
-| 解出 NV12 → CPU/GPU 上屏 | `CVPixelBuffer`（NV12/BGRA）→ `FlutterTexture.copyPixelBuffer` 回传 |
-| `PixelBufferTexture` / D3D11 共享纹理 | `FlutterTextureRegistry.register` + `textureId` |
-
-**上屏最省事的第一版**：解码输出类型给
-`kCVPixelBufferPixelFormatTypeKey = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`，
-在 `copyPixelBuffer` 里把 Y/UV 平面拷进一块 BGRA 缓冲交给引擎。
-**先跑通再谈零拷贝**（Windows 那轮的教训：先有数据再说值不值）；
-后续可以走 `CVPixelBuffer` → `CVMetalTextureCache` → Metal 纹理省掉这次拷贝。
+**原生侧复用情况**（实际做法见 §15.8）：解码器、纹理、通道都在 `darwin/`，两个 Xcode 工程都引用
+`../darwin`；macOS 侧**只写注册那一层**（`macos/Runner/MainFlutterWindow.swift`）。
 
 **签名 / entitlement**：`macos/Runner/*.entitlements` 的 `network.client` 已补（投流要联网）；
 VideoToolbox 不需要额外 entitlement，但 **Debug 与 Release 两个 entitlements 文件都要看一眼**。
@@ -882,4 +1091,259 @@ VideoToolbox 不需要额外 entitlement，但 **Debug 与 Release 两个 entitl
 - **图标**：`python tools/make_icons.py` 一次生成 Windows(.ico)/Android(含自适应)/macOS/iOS/Web，
   母版 `assets/icon/app_icon_1024.png`；换配色只改脚本顶部的 `GRAD_*` 常量。
   **改完必须看图确认**（第一版把"缝隙"写成了实心矩形，整个图形被擦掉，是看图才发现的）。
+
+---
+
+## 15. M2 路线 A（iOS 原生解码）实现说明
+
+```
+WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewModel
+                                                      │ MethodChannel('ws_scrcpy/video')
+                              ios/Runner/ScrcpyVideoChannelHandler.swift
+                                                      │
+                              ios/Runner/ScrcpyVideoDecoder.swift
+                              VideoToolbox VTDecompressionSession
+                                Annex-B → AVCC → CMSampleBuffer → CVPixelBuffer(32BGRA)
+                                                      │
+                              ios/Runner/ScrcpyVideoTexture.swift（FlutterTexture.copyPixelBuffer）
+                                                      │
+                              Flutter 侧 Texture(textureId) ◄──────┘
+```
+
+**状态（2026-10-02）**：已在 **iPhone 18 Pro 模拟器 + 真实服务端**上跑通，并**自己截图确认画面**
+（AGENTS §1.2 的铁律）。当次日志锚点：
+
+```
+纹理注册返回 0（失败）：来源=引擎 applicationRegistrar      ← 见 §15.3
+纹理注册成功：来源=FlutterViewController，textureId=1
+低延迟模式：kVTDecompressionPropertyKey_RealTime=true 设置结果=0x00000000
+画面尺寸：1184x672
+已解出第一帧并交给纹理（1184x672）
+心跳：收到 13，已喂入 12，已解出 12，丢弃 0，队列深度 0 …
+```
+
+**还没上过真机**（要过签名），模拟器走的是软件解码；真机验收清单见 §15.6。
+
+### 15.1 文件与职责
+
+| 文件 | 职责 |
+|---|---|
+| `ios/Runner/ScrcpyVideoDecoder.swift`（新） | VideoToolbox 解码：Annex-B→AVCC、SPS/PPS→`CMVideoFormatDescription`、会话重建、队列、心跳与计数。**不 import Flutter**，所以 macOS 能复用、也能编成 macOS 命令行探针 |
+| `ios/Runner/ScrcpyVideoTexture.swift`（新） | `FlutterTexture` 实现：latest-frame + 锁 + `copyPixelBuffer` |
+| `ios/Runner/ScrcpyVideoChannelHandler.swift`（新） | `ws_scrcpy/video` 通道：注册纹理、派发方法、把解出的帧交给引擎 |
+| `ios/Runner/AppDelegate.swift`（改） | 在 `didInitializeImplicitFlutterEngine` 里建 handler 并**持有**它 |
+| `ios/Runner.xcodeproj/project.pbxproj`（改） | 三个新 Swift 文件登记进 Runner target（`PBXBuildFile` + `PBXFileReference` + group + Sources phase 四处） |
+| `ios/Runner/Info.plist`（改） | `NSAllowsLocalNetworking`、`NSLocalNetworkUsageDescription`、`ITSAppUsesNonExemptEncryption=false` |
+
+**契约与 Android / Windows 一字不差**：`create` → `{textureId}`；`pushFrame`（一帧 Annex-B）→
+`{width,height}` 回执；`getSize` → `{width,height}`；`release`。
+**没有** `onSizeChanged` 反向推送（那是 Windows 崩溃 `0x58CA5` 的成因，§12.1）——Dart 侧
+"回执 + 拉取"两条路够用，`native_video_decoder.dart` 不用改一行。
+
+### 15.2 Annex-B → AVCC：这一端最容易写错的地方
+
+VideoToolbox 的 H.264 输入按 **AVCC（4 字节大端长度前缀）** 解释，**不吃起始码**，
+所以每条消息都要先转（`ScrcpyVideoDecoder.annexBToAVCC`）。三个已钉死的点：
+
+1. **切起始码必须先判 4 字节再判 3 字节**。反过来的话 `00 00 00 01 65 …` 会在偏移 1 处
+   命中 `00 00 01`，于每个 NAL 都多吃一个前导 0 字节 → **类型全错**。
+   `tools/run_vt_replay_probe.sh` 里专门有一条这条的断言（4 字节 → NAL 始于偏移 4）；
+2. **`CMBlockBufferCreateWithMemoryBlock(memoryBlock: nil)` 之后必须先 `CMBlockBufferAssureBlockMemory`**
+   再 `CMBlockBufferReplaceDataBytes`（块内存是懒分配的）。漏了这步会静默失败、一帧都出不来。
+   可行性文档 §3.1.3 的示例没有这一步；
+3. **`CMSampleBufferCreateReady` 的 `sampleSizeArray` 给整段 AVCC 长度**（一条消息里多个 NAL
+   就是**一个** sample，不需要一个 NAL 一个 sample）。
+
+另外：`nalUnitHeaderLength: 4`；`00 00 03` 这种 emulation prevention byte **原样保留**，
+解码器自己去。
+
+### 15.3 ★ 最大的坑：`applicationRegistrar.textures()` 注册纹理返回 0
+
+**现象**：设备列表、投流、收帧全都正常（`状态：推流中 · 分辨率 VideoSize(1280 x 720) · 视频帧 15`），
+但投流页红字 `原生解码失败：创建 H.264 解码器失败：注册 Flutter 纹理失败`，画面全黑。
+
+**根因**：本项目的 iOS 是**Scene 生命周期 + 隐式引擎**，通道在
+`didInitializeImplicitFlutterEngine(_:)` 里注册。此时 `engineBridge.applicationRegistrar.textures()`
+拿到的是 `FlutterTextureRegistryRelay`，而它的 **parent 是 weak 的**、还没接上宿主视图，
+`registerTexture:` 直接返回 0。引擎二进制里那几个符号能对上：
+`FlutterTextureRegistryRelay`、`T@"NSObject<FlutterTextureRegistry>",W,N,V_parent`。
+
+**修法（`ScrcpyVideoChannelHandler.register`）**：两条路依次试，**都记日志说明是哪条生效**：
+
+1. `engineBridge.applicationRegistrar.textures()`；
+2. `FlutterViewController`——**它自己就实现了 `FlutterTextureRegistry`**
+   （`FlutterViewController.h:57`），是纹理归属的最终宿主；在当前 Scene 的窗口层级里递归找它
+   （兼容被 `UINavigationController` 之类包一层的情况）。
+
+**注销必须用注册时那一个注册表**（handler 里存 `resolvedTextureRegistry`），否则注销不掉。
+
+**教训**：这条不在可行性文档的预判里——文档只把"`textures` 属性名与类型"标成 ⚠️需实测。
+**"未实现的平台能力"往往不是编译不过，而是返回 0 静默失败**，所以两个候选来源都要试、
+试完要打日志。
+
+### 15.4 原生日志：iOS 上必须走两个出口
+
+`NSLog` **只进系统日志，`flutter run` 的控制台抓不到**（2026-10-02 实测：整轮跑下来
+`flutter run` 的输出里一条 `[ScrcpyVideo]` 都没有，而 `xcrun simctl spawn booted log show`
+里一条不少）。这是 Windows 那条教训（§12.2：日志只走 `OutputDebugStringA` → `flutter run` 全程静默）
+在 iOS 上的翻版，所以 `scrcpyVideoLog` **两个出口都写**：
+
+- `NSLog("[ScrcpyVideo] …")` → 系统日志，用
+  `xcrun simctl spawn booted log show --last 3m --predicate 'eventMessage CONTAINS "ScrcpyVideo"' --style compact` 读；
+- `print("[ScrcpyVideo] …")` → stdout，`flutter run` 的控制台直接可见。
+
+**顺带一条**：Dart 侧 `AppLogger` 用的是 `developer.log`，它**同样不进 `flutter run` 的控制台**
+（要去 DevTools / VM service 看）。排"画面尺寸不对"这类问题时别指望它——真机/模拟器上
+要么看 App 内的日志面板（投流页右上角图标），要么临时用 `print`。
+
+### 15.5 离线验证：`tools/run_vt_replay_probe.sh`
+
+把 **`ios/Runner/ScrcpyVideoDecoder.swift` 本身**编到 macOS 上跑（不是副本——
+§12.3 的纪律："诊断工具不要维护第二份业务逻辑"）。三类检查，当前 **27 项检查 0 失败**：
+
+1. **Annex-B 工具函数的字节级断言**：4 字节优先、3 字节、混合起始码、AVCC 长度前缀；
+   真实抓包夹具 `test/fixtures/stream_first_video_frames.txt` 的 NAL 类型序列必须是 `[7,8]`；
+2. **真实抓包的 SPS/PPS 能建出会话**：夹具第一条（真实服务端下发）→ 画面尺寸 `1280x720`；
+3. **完整码流逐帧回放 + 低延迟 A/B**：码流由本机 `VTCompressionSession` 现编
+   （H.264 baseline、Annex-B、SPS/PPS 先发，结构与 scrcpy 一致），90 帧，
+   `RealTime=true / false / 完全不设` 三种设置各跑一遍。
+
+```
+真实抓包 SPS/PPS → 画面尺寸 1280x720
+生成 90 帧 Annex-B（640x360）
+收到 91，已喂入 90，已解出 90，丢弃 0，非全黑 90 帧       ← 三种 RealTime 设置都是这个结果
+```
+
+**结论：Apple 侧没有 Windows 那种"默认攒 1.2 秒"的缓冲**（那边是 8/43 vs 42/43）。
+`RealTime` 头文件说默认就是 true，探针把这条从"文档说"变成了"实测"。
+**但探针仍然保留这个 A/B**：真出现"已解出 ≪ 已喂入"时，它是第一个要跑的入口。
+
+**探针自己踩过的坑（已修，别再犯）**：第一版把 90 帧**瞬间推完**，撞上 8 帧的等待队列上限，
+**把 IDR 丢了** → 后面的 P 帧引用不存在的参考帧 → 满屏 `kVTVideoDecoderBadDataErr`（-12909），
+看起来像"解码器完全不工作"。真实来源是网络、本来就按 33ms 到，所以探针现在按 10ms 节奏喂，
+并**断言 `丢弃 == 0`**——"诊断工具也要有自己的边界校验"（§12.3 那条教训）。
+
+### 15.6 工程、真机与合规（还没做/只做了一半的部分）
+
+- **文件进 Xcode**：三个新 Swift 文件已登记进 `ios/Runner.xcodeproj/project.pbxproj`
+  （`plutil -lint` 通过、`xcodebuild -list` 能解析、`flutter build ios` 能编译）。
+  以后再加文件照着改那四处（BuildFile / FileReference / group children / Sources phase）。
+- **CocoaPods 与 SPM 并存**：Flutter 3.47 默认开 Swift Package Manager，但
+  `flutter_secure_storage` 还不支持 SPM，Flutter 会对它**回退到 CocoaPods**。
+  所以 `brew install cocoapods` 是**硬前置**（没装时 `flutter build ios` 直接以
+  `CocoaPods not installed or not in valid state` 结束，报错信息里那句
+  "The following plugins do not support Swift Package Manager" 才是真正原因）。
+- **`Info.plist` 已加**（按可行性文档 §4.2 的清单）：
+  `NSAppTransportSecurity.NSAllowsLocalNetworking`（局域网明文 `ws://<设备IPv4>:8886` 要它，
+  比 `NSAllowsArbitraryLoads` 安全得多）、`NSLocalNetworkUsageDescription`、
+  `ITSAppUsesNonExemptEncryption=false`。
+  ⚠️ 这两条**都还没在真机上实测**（模拟器上公网 `wss://` 用不到它们）。
+- **还没做**：真机签名 / provisioning；App Store 审核那套（远程控制类 §4.2.7，
+  可行性文档 §4.2c 有对策）；应用标识仍是 `com.example`。
+- **真机验收清单**（照 §1.2 的路子，别信日志）：
+  ① 起手先看 `低延迟模式：kVTDecompressionPropertyKey_RealTime=true 设置结果=0x00000000`；
+  ② `纹理注册成功：来源=…`（真机上若 `引擎 applicationRegistrar` 这条就能成，说明模拟器那个坑
+     是场景相关的，值得回头在 §15.3 补一句）；
+  ③ 心跳 `已解出 / 已喂入` 应接近 1:1，`丢弃` 应长期为 0；
+  ④ **截图确认画面**（真机 `xcrun devicectl` 或直接看屏幕），并留意色彩是否正常
+     （输出格式是 32BGRA，理论上不会红蓝颠倒，但真机必须看一眼）。
+
+### 15.7 ★ 顺带修掉：画面糊 —— 编码边界的**宽高比**必须跟设备一致
+
+**现象**：iOS 上第一次跑通时画面能出，但**糊得明显**（MAA 界面的字勉强可认）。
+
+**数据（不是猜）**：临时在视口上报处打了一行日志，拿到
+
+```
+[Viewport] 画面控件 402.0x664.0 逻辑 @3.0x → 上报编码边界 1206x1992
+```
+
+设备原生 `1280x720`（横屏），而我们的视口是**竖屏**。老的 `clampBoundsToNative` 只做等比缩放，
+算出 **432x720 的竖框**；服务端是"把画面按比例**装进**这个框"（不拉伸），
+于是 16:9 的横屏画面装进竖框后只剩 **432x240**——上屏要放大 2.96 倍，肉眼就是糊。
+
+**修法（`StreamSessionService.clampBoundsToNative`）**：多一步"**先把视口按设备宽高比收成框**"，
+再收敛到原生范围内、再对齐 16 宏块。同一场景变成 **1200x672**，像素多了 **7.7 倍**，
+截图里的字立刻清楚了（服务端实际给到 `1184x672`）。
+
+**这条改的是共享 Dart 逻辑，Windows 也受影响（而且是变好）**：
+Windows 上视口 1898x853 对设备 1280x720，老算法给 `1280x560`，新算法给 **`1280x720`**
+（多 28% 像素、比例也正确）。`test/feature/stream/video_bounds_clamp_test.dart` 里
+"iPhone 竖屏 1206x1992 对横屏设备"就是这条的**回归门禁**（断言像素数 > 432×240×7）。
+
+**教训**：§12.7 只写了"不许超过原生"，漏了"**框的比例必须跟设备一致**"——
+"向服务端要一个框"这件事有两个自由度（大小、比例），只钉住一个就会在另一个上吃亏。
+
+### 15.8 macOS：只写了"注册"那一层（2026-10-02 已完成）
+
+**做法**：把三个 Swift 文件从 `ios/Runner/` 搬到 **`darwin/`**（Flutter 生态里 iOS+macOS 共享
+源码的惯例目录名），两端 Xcode 工程各自加一个 `path = ../darwin` 的分组引用同一批文件：
+
+```
+darwin/
+├── ScrcpyVideoDecoder.swift        # 纯 Foundation/CoreMedia/VideoToolbox，与 Flutter 无关
+├── ScrcpyVideoTexture.swift        # FlutterTexture（iOS/macOS 同为 `FlutterTexture` 协议）
+└── ScrcpyVideoChannelHandler.swift # 通道；两端只差"从哪拿纹理注册表"
+```
+
+**两端唯一的差异被做成了参数**，而不是复制一份通道逻辑：
+
+```swift
+init(messenger: FlutterBinaryMessenger,
+     textureRegistry: FlutterTextureRegistry,
+     fallbackTextureRegistry: @escaping () -> FlutterTextureRegistry? = { nil })
+```
+
+| 端 | 主注册表 | 兜底 | 实际生效的 |
+|---|---|---|---|
+| iOS | `engineBridge.applicationRegistrar.textures()` | 当前 Scene 里的 `FlutterViewController` | **兜底那条**（§15.3） |
+| macOS | `flutterViewController.registrar(forPlugin:).textures` | `flutterViewController.engine` | **主注册表**（实测日志 `纹理注册成功：来源=主注册表（…macOS registrar）`） |
+
+**macOS 侧要写的全部代码**就是 `macos/Runner/MainFlutterWindow.swift` 里的这几行
+（`awakeFromNib` 里、`RegisterGeneratedPlugins` 之后），外加一个属性持住 handler
+（不持有会被立刻释放，通道调用全部落空）：
+
+```swift
+let registrar = flutterViewController.registrar(forPlugin: "WsScrcpyVideo")
+videoChannel = ScrcpyVideoChannelHandler(
+  messenger: registrar.messenger,          // ← macOS 是**属性**，iOS 是方法 messenger()
+  textureRegistry: registrar.textures,
+  fallbackTextureRegistry: { flutterViewController.engine })
+```
+
+**踩到的几个小差异（都是"照着 iOS 写会编译不过"那一类）**：
+
+- **Flutter 模块名不同**：iOS `import Flutter`、macOS `import FlutterMacOS` →
+  共享文件里用 `#if os(iOS) / #elseif os(macOS)`；
+- **`messenger` / `textures` 在 macOS 是属性、在 iOS 是方法**（`registrar.messenger` vs
+  `engineBridge.applicationRegistrar.messenger()`）；
+- **`registrarForPlugin:` 的 Swift 名是 `registrar(forPlugin:)`**；
+- **`ScrcpyVideoChannelHandler` 原来 `import UIKit`**（为了找 `FlutterViewController`）——
+  搬到 `darwin/` 时必须把这段挪回 iOS 侧（现在是 `AppDelegate` 里的两个私有静态方法），
+  否则 macOS 编不过。
+
+**验证（与 iOS 同一套，照 §15.5 / §15.6）**：
+
+- `flutter build macos --debug` 通过；构建日志里能看到
+  `SwiftCompile … /Users/…/darwin/ScrcpyVideoDecoder.swift (in target 'Runner')`
+  —— 这就是"macOS 真的在编共享文件"的证据；
+- **本机实跑 + 自己截图**（`screencapture -x`，注意需要系统的"屏幕录制"权限）：
+  `纹理注册成功：来源=主注册表`、`低延迟模式：…RealTime=true 设置结果=0x00000000`、
+  `硬解：是`、`画面尺寸：1280x720`、`已解出第一帧并交给纹理`、
+  心跳 `收到 13 / 已喂入 12 / 已解出 12 / 丢弃 0`；截图里设备画面清晰可读。
+  用户也自己试过一轮，反馈可用；
+- 离线探针不用改（它本来就是拿这份解码器在 macOS 上跑的）——这也正是当初把解码器写成
+  "不 import Flutter"的回报。
+
+**两个 macOS 特有的、踩过的坑**：
+
+1. **`flutter run -d macos` 有时会 `Failed to foreground app; open returned 1`**，
+   窗口被压在别的窗口后面。想截图确认上屏时，直接 `open build/macos/Build/Products/Debug/ws_scrcpy_client.app`
+   把已经构建好的产物拉起来更省事（`--dart-define` 已经编进产物里了）；
+   再用 `osascript -e 'tell application "System Events" to tell process "ws_scrcpy_client" to set frontmost to true'`
+   把它提到最前。
+2. **`screencapture` 需要"屏幕录制"权限**（TCC）。没授权时它报
+   `could not create image from display`，且**不会**弹窗提示——别误判成"App 没窗口"。
+   （iOS 模拟器那条 `xcrun simctl io booted screenshot` 走的是 simctl，不受这个限制。）
+
 
