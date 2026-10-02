@@ -423,6 +423,79 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 
 ---
 
+### 9.3 ★★ Web 端（分支 `2-web-client`）：**浏览器不给 WebSocket 加自定义请求头** ★★
+
+**这一条是整个 web 端最硬的平台约束，先看它再看别的**，因为它会直接改变产品形态。
+
+**背景**：用户说服务端自带的网页版 UI 很难看，想自己做一套 web 端。分支 `2-web-client`。
+"能用先，UI 后期再说"。
+
+#### 实测到的第一手事实（不是推测）
+
+| 事实 | 证据 |
+|---|---|
+| `flutter build web --release` **能过**，14.9s | 产物 41MB；`web/` 目录本来就有（`flutter create` 生成的） |
+| 但打开是**白屏**，**原因不是我们的代码** | 静态服务器日志里 `main.dart.js`、字体都下了，**`canvaskit.wasm` 一次都没请求**。build config 带 `engineRevision`，Flutter 默认从 **gstatic.com** 拉 CanvasKit；沙箱出网受限→永远白屏。**加 `--no-web-resources-cdn` 后正常** |
+| 白屏 → **灰屏** = 引擎起来了但 widget 树没产出 | 灰是 release 下抛异常的样子。定位到 `AppDependencies.create()` **同步**调 `AppDatabase.open()`，而 `app_database.dart` import 了 `dart:io` |
+
+**为什么"编得过"却"跑不起来"**：`dart2js` 对 `dart:io` 提供的是
+**能编译、一调用就抛**的桩实现。`dart:io` 只出现在 4 个文件里，全在启动路径上。
+
+#### ★ 核心约束：web 上拿不到 Basic 凭据
+
+原生端握手时带 `Authorization: Basic ...`，**浏览器没有这个能力**（`WebSocket` 构造器不收 headers）。
+服务端 bundle 我反查过：它是 `new WebSocket(url)`，**全文没有任何 auth 处理** ——
+它靠的是"页面本身就从那个受保护的源站加载"，所以**页面加载时浏览器已经挑战过一次**、
+把凭据缓存到了该 realm，之后（含 WS 握手）自动带上。
+
+**我们的页面是从别的源站（如 `127.0.0.1:8765`）提供的**，没有那次页面级挑战，
+于是每一次 WS 握手都是一次未认证请求 → 401 → 浏览器弹一次登录框。
+用户报的"**每次点击都要 basic auth**"就是这个。
+
+**逐条修法**：
+
+1. **web 上只走服务端代理地址**（`StreamTarget.candidateUris` 用 `isWebPlatform` 分流）：
+   设备直连地址（`192.168.x.x:8000`）与服务端入口**不是同一个 origin**，
+   浏览器会为它**单独**弹框；而公网入口下那些内网地址本来也不可达 ——
+   每试一个就白弹一次，这是"每次点击都要"的放大器。
+2. **错误文案改成"告诉你该怎么办"**：`ws_error_translator.dart` 里先做一次
+   **平台中立**的判定（两端异常类型完全不同：原生 `WebSocketException`，
+   web `WebSocketChannelException` 包 DOMException），web 上给的是
+   `browserAuthHint`（提示在弹出的框里输入一次账号密码并勾选"记住密码"）。
+3. **★ 真正的解药是部署方式**：把我们 `build/web` 的产物**挂在 ws-scrcpy 服务端同一个源站下**
+   （例如 `https://android.dorkytiger.top/app/`）。那样页面加载本身就会触发**一次**
+   挑战，浏览器把凭据缓存到该 realm，之后**所有 WS 握手全静默** —— 和它自带网页版一模一样。
+   从 `127.0.0.1:8765` 这种跨源地址访问，**至少弹一次是免不了的**。
+
+#### 为了跑起来做的改造（原生侧一行行为没变，241 项测试全过）
+
+- `lib/core/database/database_executor{,_io,_web}.dart`：`app_database.dart` 里彻底去掉
+  `dart:io` / `path_provider`，打开方式改成**条件导出**按平台分派。
+  **web 上继续用 drift**（WASM 后端），**不写第二套存储** —— 表结构与 DAO 两端共用。
+- `lib/core/ws/web_socket_transport{,_io,_web,_connect}.dart`：接口保持纯 Dart，
+  io 实现用 `dart:io`（带 `Authorization` 头），web 实现用 `web_socket_channel`（**忽略该头**）。
+- `lib/core/platform/platform_capabilities{,_io,_web}.dart`：`core` 不许 import Flutter，
+  所以不用 `kIsWeb`，用条件导出定死一个 `const bool isWebPlatform`。
+- `device_list_page.dart` 的 `Platform.environment` 用 `!kIsWeb &&` 短路保护
+  （`dart:io` 的 `Platform.environment` 在浏览器里会直接抛）。
+- `tools/prepare_web_deps.sh`：把 `sqlite3.wasm` + `drift_worker.js` 从**本地 pub 缓存**
+  拷进 `web/`（**不进仓库**，`.gitignore` 已加）—— 与 `tools/prepare_windows_deps.cmd`
+  是同一个套路。**注意 drift_dev 2.35 已经没有 `make-web-worker` 子命令了**，
+  `drift_worker.js` 是 drift 包**自带编译好的**。
+
+#### 已知未解决（下次接着做）
+
+- **中文字在浏览器里显示成方块**：Flutter web 的 CJK 回退字体要从 `fonts.gstatic.com` 按需下载
+  （沙箱取不到就变豆腐块）。正常有网的浏览器没问题；**内网/离线部署要自带 CJK 字体**。
+- **阶段二（解码上屏）还没开始**：走 WebCodecs。好消息是服务端 bundle 里的
+  `WebCodecsPlayer` 已经证明**不用做 Annex-B→AVCC**（不传 `VideoDecoderConfig.description`
+  就是 Annex-B 输入），坏消息是它对网页端用的是 **480×480 / 24fps / 512kbps**
+  —— 浏览器侧解码是弱环，**别期待和原生同画质**。
+- **验证手段受限**：我这边没有辅助访问权限，点不了浏览器也点不了模拟器，
+  只能"构建 + 静态服务器 + `screencapture` 看首屏"；**交互验证要靠用户**。
+
+---
+
 ### 9.2 ★ 画面适配与横屏布局（2026-10-02，用户看到横屏截图后要求改）
 
 **用户原话**："现在触屏没啥问题了，但是横屏布局要改一下，而且这个设备大小，不能更改是吗，

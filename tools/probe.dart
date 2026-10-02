@@ -23,6 +23,7 @@ import 'package:ws_scrcpy_client/core/ws/multiplexed_socket.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_action.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_url_builder.dart';
 import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
+import 'package:ws_scrcpy_client/core/ws/web_socket_transport_io.dart';
 
 const String _defaultUrl = 'https://android.dorkytiger.top/';
 

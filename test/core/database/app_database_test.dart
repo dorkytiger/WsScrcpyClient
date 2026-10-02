@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ws_scrcpy_client/core/database/app_database.dart';
+import 'package:ws_scrcpy_client/core/database/database_executor.dart';
 
 void main() {
   group('AppDatabase 结构', () {
@@ -60,8 +61,8 @@ void main() {
         return;
       }
 
-      final directory = await AppDatabase.resolveDataDirectory();
-      final file = await AppDatabase.resolveDatabaseFile();
+      final directory = await resolveDataDirectory();
+      final file = await resolveDatabaseFile();
 
       expect(directory.path, override);
       expect(await directory.exists(), isTrue);

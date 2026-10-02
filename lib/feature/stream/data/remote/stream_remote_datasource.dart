@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
-import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
+import 'package:ws_scrcpy_client/core/ws/web_socket_transport_connect.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_error_translator.dart';
 
 /// 一条已建立的投流连接。
@@ -45,7 +45,7 @@ class StreamRemoteDatasource {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     try {
-      final transport = await IoWebSocketTransport.connect(
+      final transport = await connectWebSocketTransport(
         uri,
         authorization: authorization,
         timeout: timeout,

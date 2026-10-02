@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/common/widget/async_state_view.dart';
@@ -78,7 +79,11 @@ class _DeviceListPageState extends State<DeviceListPage> {
     }
     // 两条入口同一个语义：桌面端用宿主环境变量，iOS/Android 拿不到宿主环境变量，
     // 用编译期的 `--dart-define=WS_SCRCPY_AUTOSTART=1`。
-    final fromEnvironment = Platform.environment['WS_SCRCPY_AUTOSTART'] == '1';
+    //
+    // web 上**必须**先判 `kIsWeb`：`dart:io` 在浏览器里只是"能编译、一调用就抛"的桩，
+    // 而 `Platform.environment` 会直接抛 `Unsupported operation`（`&&` 会短路，所以安全）。
+    final fromEnvironment =
+        !kIsWeb && Platform.environment['WS_SCRCPY_AUTOSTART'] == '1';
     if (!fromEnvironment && !DebugBootstrap.isAutostartEnabled) {
       return;
     }
