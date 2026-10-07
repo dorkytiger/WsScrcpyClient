@@ -63,8 +63,15 @@ final class ScrcpyVideoChannelHandler: NSObject {
             // ★ 原生视频层优先：平台视图挂着时直接 enqueue（不进 Flutter 合成），
             //   没挂/状态异常时返回 false，继续走原来的 FlutterTexture 路径 ——
             //   两条路都在，出问题只是"回到旧行为"，不会黑屏。
-            if ScrcpyVideoSurfaceRegistry.shared.enqueue(buffer) { return }
+            let registry = ScrcpyVideoSurfaceRegistry.shared
+            // ★ 只有原生层**确认在工作**之后才让纹理路径让位：没确认前两条路都跑，
+            //   这样"原生层不显示"最坏就是继续用纹理（不会黑屏）。
+            if registry.isLive {
+              registry.enqueue(buffer)
+              return
+            }
             self?.publish(buffer)
+            registry.enqueue(buffer)
         }
 
         let channel = FlutterMethodChannel(name: Self.channelName, binaryMessenger: messenger)

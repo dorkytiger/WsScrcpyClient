@@ -29,6 +29,19 @@ final class ScrcpyVideoSurfaceRegistry {
   private var layer: AVSampleBufferDisplayLayer?
   private let lock = NSLock()
 
+  /// 已经成功 enqueue 的帧数；配合 `status == .rendering` 用来判断"原生层真的在工作"。
+  private var enqueuedFrames = 0
+  private var loggedFirstFrame = false
+
+  /// 原生层是否已确认在消费帧。**没确认之前纹理路径继续跑** ——
+  /// 否则一旦 layer 因为任何原因不显示（比如视图尺寸为 0），画面就直接黑了（实测踩过）。
+  var isLive: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let layer else { return false }
+    return enqueuedFrames >= 3 && layer.status == .rendering
+  }
+
   private init() {}
 
   func attach(_ layer: AVSampleBufferDisplayLayer) {
@@ -94,6 +107,17 @@ final class ScrcpyVideoSurfaceRegistry {
     }
 
     layer.enqueue(sample)
+    lock.lock()
+    enqueuedFrames += 1
+    let first = !loggedFirstFrame
+    if first { loggedFirstFrame = true }
+    lock.unlock()
+    if first {
+      // 一行把"layer 到底有没有条件显示"讲清楚：尺寸为 0 / 没进 window 都会是黑的
+      scrcpyVideoLog(
+        "原生层首帧：layer bounds=\(layer.bounds.size) status=\(layer.status.rawValue) "
+          + "ready=\(layer.isReadyForMoreMediaData) window=\(layer.window != nil)")
+    }
     return true
   }
 }
