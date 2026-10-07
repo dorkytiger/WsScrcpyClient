@@ -154,15 +154,70 @@ jobs:
             apt-get update -qq && apt-get install -y -qq zip unzip
           fi
 
-      - name: 装 Android SDK（cmdline-tools + 平台/构建工具）
-        uses: https://github.com/android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: '11076708'
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: 装 Android SDK（★ 走腾讯镜像：这台机器连不上 dl.google.com）
+        # 实测（2026-10-07，lingke）：github.com / api.adoptium.net / repo.maven.apache.org 都通，
+        # **只有 dl.google.com 不通（curl 返回 000）** —— 而它既是 Android SDK 的下载站，
+        # 也是 Google Maven 的站（AGP/AndroidX 依赖在上面）。所以：
+        #   ① SDK 组件改成从腾讯镜像直接取 zip（不用 sdkmanager，免得它去 dl.google.com）；
+        #   ② Gradle 仓库在下一步换成阿里云镜像。
+        # 文件名取自 Google 官方索引 repository2-3.xml —— **build-tools 从 35 起把 `-` 换成了 `_`**
+        # （`build-tools_r36_linux.zip`），照旧名字写会 404。
+        # 版本对应：compileSdk 36（Flutter 3.47 默认）+ build-tools 36.0.0。
+        run: |
+          set -e
+          SDK="$HOME/android-sdk"
+          BASE="https://mirrors.cloud.tencent.com/AndroidSDK"
+          mkdir -p "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"
 
-      - name: 接受 SDK 许可（Gradle 缺组件时会自动补装，但需要先有许可）
-        continue-on-error: true
-        run: yes | flutter doctor --android-licenses || true
+          fetch() { curl -fSL --retry 3 --retry-delay 2 -o /tmp/pkg.zip "$BASE/$1"; }
+          unpack_to() {
+            rm -rf /tmp/unpack && mkdir -p /tmp/unpack
+            unzip -q /tmp/pkg.zip -d /tmp/unpack
+            mv "$(find /tmp/unpack -mindepth 1 -maxdepth 1 | head -1)" "$1"
+          }
+
+          fetch platform-36_r02.zip        && unpack_to "$SDK/platforms/android-36"
+          fetch build-tools_r36_linux.zip  && unpack_to "$SDK/build-tools/36.0.0"
+          fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"
+          fetch commandlinetools-linux-16111833_latest.zip
+          rm -rf /tmp/unpack && mkdir -p /tmp/unpack "$SDK/cmdline-tools"
+          unzip -q /tmp/pkg.zip -d /tmp/unpack
+          mv /tmp/unpack/cmdline-tools "$SDK/cmdline-tools/latest"
+
+          # 许可文件：不写的话 AGP 认为许可没接受，直接拒绝构建
+          printf '%s\n' \
+            8933bad161af4178b1185d1a37fbf41ea5269c55 \
+            d56f5187479451eabf01fb78af6dfcb131a6481e \
+            24333f8a63b6825ea9c5514f83c2829b004d1fee > "$SDK/licenses/android-sdk-license"
+          printf '%s\n' 84831b9409646a918e30573bab4c9c91346d8abd \
+            > "$SDK/licenses/android-sdk-preview-license"
+
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          du -sh "$SDK"
+          ls "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"
+
+      - name: Gradle 换阿里云镜像（Google Maven 在 dl.google.com 上，这台机器不通）
+        # 写死 google() 的只有 4 个 .gradle.kts：项目 2 个 + Flutter gradle 插件 2 个
+        # （后者在构建时会把仓库注入到 app 项目里）。全部换成阿里云镜像；
+        # 末尾的 grep 是**门禁**：只要还剩一处 google() 就报错退出，免得它偷偷去连不通的站。
+        run: |
+          set -e
+          GOOGLE_MIRROR='maven("https://maven.aliyun.com/repository/google")'
+          PUBLIC_MIRROR='maven("https://maven.aliyun.com/repository/public")'
+          PLUGIN_MIRROR='maven("https://maven.aliyun.com/repository/gradle-plugin")'
+          FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")}"
+          for f in android/build.gradle.kts android/settings.gradle.kts \
+                   "$FLUTTER_ROOT/packages/flutter_tools/gradle/resolve_dependencies.gradle.kts" \
+                   "$FLUTTER_ROOT/packages/flutter_tools/gradle/settings.gradle.kts"; do
+            [ -f "$f" ] || { echo "缺文件：$f"; exit 1; }
+            sed -i "s|google()|$GOOGLE_MIRROR|g; s|mavenCentral()|$PUBLIC_MIRROR|g; s|gradlePluginPortal()|$PLUGIN_MIRROR|g" "$f"
+          done
+          if grep -rn "google()" android/ "$FLUTTER_ROOT/packages/flutter_tools/gradle/"; then
+            echo "还有 google() 没换掉（上面那几行），它会去连不通的 dl.google.com"; exit 1
+          fi
+          grep -n "aliyun" android/settings.gradle.kts | head -3
 
       - name: 环境体检（失败不拦，只作参考）
         continue-on-error: true

@@ -157,6 +157,51 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 > ② 干脆不用第三方 action —— Flutter 用 `curl` 下 tar.xz + `tar -xJf` 自己装
 > （还能顺手换国内镜像绕开 `storage.googleapis.com`），Android SDK 同理下 cmdline-tools。
 
+#### ★★ 第三个坑（2026-10-07 实测）：这台 runner **连不上 `dl.google.com`**
+
+在 `lingke` 上实测的连通性（用户跑的 curl）：
+
+| 主机 | 结果 | 影响 |
+|---|---|---|
+| `github.com` | 200 | 第三方 action（全 URL）能取 ✓ |
+| `storage.googleapis.com` | **400**（= 可达，Google 只是拒了根路径 HEAD） | Flutter SDK 能下 ✓ |
+| `api.adoptium.net` | 200 | JDK 能下 ✓ |
+| `repo.maven.apache.org` | 200 | Maven Central 能下 ✓ |
+| **`dl.google.com`** | **000 / FAIL** | ❌ 既是 Android SDK 下载站，也是 Google Maven 的站（AGP/AndroidX 在上面） |
+
+**两条修法（都已实施，纯工作流侧、不动服务器）**：
+
+1. **Android SDK 组件改从腾讯镜像取 zip**（不用 `sdkmanager` —— 它只会去 `dl.google.com`）：
+
+   ```
+   https://mirrors.cloud.tencent.com/AndroidSDK/
+     platform-36_r02.zip                    → platforms/android-36   （compileSdk 36）
+     build-tools_r36_linux.zip              → build-tools/36.0.0    ★ 注意下划线
+     platform-tools_r37.0.1-linux.zip       → platform-tools
+     commandlinetools-linux-16111833_latest.zip → cmdline-tools/latest
+   ```
+
+   ★ **文件名陷阱**：Google 从 build-tools **35** 起把 `-` 换成了 `_`
+   （`build-tools_r36_linux.zip`，而 34 是 `build-tools_r34-linux.zip`）。
+   权威清单是 Google 的 `https://dl.google.com/android/repository/repository2-3.xml`
+   （从能访问的机器上拉下来 grep 即可）。
+   另外**必须手写许可文件**（`$SDK/licenses/android-sdk-license` 等），否则 AGP 直接拒绝构建。
+
+2. **Gradle 仓库换阿里云镜像**：项目里写死 `google()` 的只有 4 个 `.gradle.kts`
+   （`android/build.gradle.kts`、`android/settings.gradle.kts`，以及 Flutter SDK 的
+   `packages/flutter_tools/gradle/{resolve_dependencies,settings}.gradle.kts`）。
+   CI 里对**这次检出**做 `sed` 替换（不改仓库文件），并在末尾加一道**门禁**：
+   只要还剩一处 `google()` 就报错退出 —— 否则它会去连不通的站、拖慢甚至挂掉构建。
+
+   ```
+   google()             → maven("https://maven.aliyun.com/repository/google")
+   mavenCentral()       → maven("https://maven.aliyun.com/repository/public")
+   gradlePluginPortal() → maven("https://maven.aliyun.com/repository/gradle-plugin")
+   ```
+
+> **还没验证的一个点**：`pub.dev` 那台机器通不通（`flutter pub get` 要用）。
+> 如果不通，就在 workflow 里加 `PUB_HOSTED_URL=https://pub.flutter-io.cn`（Flutter 中国镜像）。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
