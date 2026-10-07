@@ -127,7 +127,21 @@ class NativeVideoSurface extends StatefulWidget {
 4. **测量**（与低延迟讨论共用）：设备上跑毫秒表 → 高帧率拍屏算 input-to-photon，
    记录"纹理路径 vs 原生层路径"的差值（预期 10–25 ms）。
 
-## 5.1 ★ macOS 实测记录（2026-10-07）：接上了但**不显示**
+## 5.1 ★ macOS 实测记录（2026-10-07）：**已跑通**（画面 ✓ 触摸 ✓）
+
+**结论（2026-10-07 17:55 用户实机确认）**：macOS 上原生层正常出画面，鼠标/触摸操作也正常 ——
+`PlatformViewHitTestBehavior.transparent` 这条生效了，手势没有被原生视图吃掉。
+
+**从"全黑"到"出画面"，同一次改了两处（无法区分是哪一处解决的，诚实记下来）**：
+
+| 改动 | 改前 | 改后 |
+|---|---|---|
+| 帧时间戳 | `PTS = .invalid`（完全依赖 `DisplayImmediately` 生效） | **递增的有效 PTS**（`frameIndex/60`） |
+| attachment 写法 | `unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0))` 取字典再 `CMSetAttachment` | `CMSampleBuffer` 本身符合 `CMAttachmentBearer` → **直接** `CMSetAttachment(sample, …)` |
+
+> 想弄清到底是哪一处，可以只回退其中一处再跑 —— 现在的写法两处都是标准写法，不必回退。
+
+**诊断数据（当时的"全黑"现场，留着对照）**：
 
 日志（`ScrcpyVideo` 前缀）：
 
@@ -148,20 +162,23 @@ class NativeVideoSurface extends StatefulWidget {
 `kCMSampleAttachmentKey_DisplayImmediately` 实际没写进 attachment 字典，
 而我们的 PTS 又是 `.invalid`，layer 就会**永远不显示**（黑）。
 
-**还有一个设计教训（已改）**：我一开始用"成功 enqueue ≥3 帧 + status==rendering"当作
-"原生层在工作"的判据 → 它一成立就把纹理路径切断 → **黑屏且无兜底** ✗。
-"enqueue 成功"≠"看得见"；在没有可靠判据之前，**原生层必须显式开启**
-（`NativeVideoSurface.debugForceEnabled = true`），默认走纹理路径。
+**设计上的最终取舍（用户 2026-10-07 定调）**：**不留纹理兜底** —— "能实现就是能稳定跑，
+不能实现就是不能实现"。所以通道处理器现在是"挂着原生层就只走原生层"。
+（中间试过"enqueue 成功就当原生层在工作"，那是错的判据：**enqueue 成功 ≠ 看得见** ——
+实测三者全正常却全黑，于是纹理被切断、没有任何兜底。）
 
-待查项（下次继续）：① 用 `CMSetAttachment` 前先 `CFArrayGetValueAtIndex` 的返回是否真的是
-NSMutableDictionary；② 试 `CMSampleBufferSetInvalidateCallback`? 不用；③ 试**不等 vsync**
-的 `layer.flush()` 组合；④ 最后手段：改用 `AVSampleBufferDisplayLayer` 的
-`enqueue` + 明确 PTS（用帧序号造一个递增时间）看是否显示。
+**层级诊断（现在留在代码里，一次性打印）**：
+
+```
+原生层视图：frame=(0.0, 0.0, 736.0, 400.0) hidden=false superview=true window=true alpha=1.0 layerBounds=(736.0, 400.0)
+```
+
+说明平台视图确实进了窗口、尺寸也对 —— 所以当时的问题不在布局，而在送帧那一步（见上表）。
 
 ## 6. 分阶段
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | darwin：`AVSampleBufferDisplayLayer` 共享实现 + 两端平台视图 + Dart 开关（contain only） | **待做（下一步）** |
+| P0 | darwin：`AVSampleBufferDisplayLayer` 共享实现 + 两端平台视图 + Dart 开关（contain only） | **macOS 已跑通 ✓（17:55 用户实机确认：画面 + 触摸）；iOS 待真机/模拟器验证** |
 | P1 | cover 模式进原生层；把"生效编码边界/放大倍率"的诊断接到新链路 | 待做 |
 | P2 | Android `SurfaceView`（解码器已往 Surface 画，改动最小）；Windows `SwapChainPanel` | 待做 |
