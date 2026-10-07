@@ -1227,14 +1227,17 @@ VideoToolbox 不需要额外 entitlement，但 **Debug 与 Release 两个 entitl
 
 ## 14. CI 与应用图标
 
-- **CI（GitHub Actions）**：`.github/workflows/build.yml` 六个 job ——
-  `verify`（analyze + test，门禁）/ `android`（APK）/ `web`（静态站点）/ `windows`（zip）/
-  `apple`（iOS 未签名 ipa + macOS zip，**合在一个 macOS job 里省 10 倍计费**）/
-  `release`（只在推 `v*` tag 时发 Release，用自带的 `GITHUB_TOKEN`）。
-  四个构建 job 都 `needs: verify`。**硬约束：Windows 与 macOS/iOS 的产物只能在对应系统上构建**，
-  好在 `windows-latest` / `macos-latest` 是 GitHub 自带的（不再是自托管 runner）。
+- **CI 用 Forgejo（当前）**：`.forgejo/workflows/build.yml` 四个 job ——
+  `verify`（analyze + test，门禁）/ `android`（APK）/ `web`（静态站点 zip）/
+  `windows`（zip，靠仓库变量 `WINDOWS_RUNNER=true` 开关，默认不跑）。
+  **硬约束：Windows 桌面产物只能在 Windows 上构建**，所以那一个 job 需要一台 Windows 自托管
+  runner（`runs-on: windows` ↔ 标签 `windows:host`）；Android 与 web 在 Linux 上没问题。
+  **Apple 两端不在 CI 里**（要 macOS runner，不划算），包本机出。
   Windows 依赖那一步在 CI 上用 `tools\prepare_windows_deps.ps1 -Online`（干净机器没有本机 NuGet 缓存）。
-  完整 job 表、Secrets、故障对照见 **`docs/ci.md`**。
+- **另有一份 GitHub Actions 工作流**（`.github/workflows/build.yml`）：比 Forgejo 那份多了
+  iOS / macOS 与 tag 自动发 Release，但**默认只手动触发** —— GitHub 私有仓库的 Actions
+  要吃每月免费额度，自托管 Forgejo 不吃。**Forgejo 不读 `.github/workflows/`，两份可以并存**，
+  切换步骤见 `docs/ci.md` §9。
 - **图标**：`python tools/make_icons.py` 一次生成 Windows(.ico)/Android(含自适应)/macOS/iOS/Web，
   母版 `assets/icon/app_icon_1024.png`；换配色只改脚本顶部的 `GRAD_*` 常量。
   **改完必须看图确认**（第一版把"缝隙"写成了实心矩形，整个图形被擦掉，是看图才发现的）。

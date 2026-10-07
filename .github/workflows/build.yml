@@ -1,4 +1,15 @@
-# GitHub Actions：五端构建（Android / Windows / web / iOS / macOS）+ 打 tag 自动发 Release
+# GitHub Actions（★ 默认**不自动跑**，只在手动 workflow_dispatch 时跑）
+#
+# 为什么：GitHub 私有仓库的 Actions 分钟数要吃每月免费额度，而这个仓库改用**自托管
+# Forgejo runner**（`.forgejo/workflows/build.yml`，那才是当前在用的 CI）。
+# 这份文件留着是为了"以后想切到 GitHub"时不用重写 —— 触发方式全部准备好，
+# 想启用就把下面 `on:` 里注释掉的 push / pull_request / tags 恢复，并删掉本段说明。
+# 详细对照见 docs/ci.md §7。
+#
+# 它有 Forgejo 那份没有的东西：**iOS 与 macOS**（GitHub 自带 macos-latest），
+# 以及 tag 自动发 Release（GITHUB_TOKEN 自带，不用另配 token）。
+#
+# 五端构建（Android / Windows / web / iOS / macOS）+ 打 tag 自动发 Release
 #
 # ── 为什么这份能覆盖五端 ────────────────────────────────────────────────
 # GitHub 自带 `windows-latest` 与 `macos-latest`（不像自托管方案要自己注册机器），
@@ -19,13 +30,14 @@
 name: build
 
 on:
-  push:
-    # 默认分支可能是 master 也可能是 main，两个都收，避免"推了却不触发"。
-    branches: [master, main]
-    tags: ['v*']
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [master, main]
+  # ★ 想全量启用就把下面三段取消注释（当前刻意只留手动触发，避免烧 GitHub 额度）。
+  # push:
+  #   # 默认分支可能是 master 也可能是 main，两个都收，避免"推了却不触发"。
+  #   branches: [master, main]
+  #   tags: ['v*']
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review]
+  #   branches: [master, main]
   workflow_dispatch:
     inputs:
       split_abi:
