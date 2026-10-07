@@ -60,6 +60,30 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 不需要 Android SDK（Windows job 只出桌面包）。自检：`flutter doctor -v` 里 Windows 那一项全绿。
 
+## 1.1 方案 B：**不常在线的机器**（Mac / Windows）怎么接
+
+**当前范围（2026-10-07 定的）**：CI 只跑 **`verify` + `android` + `web`**（都在 24/7 的 Linux
+runner 上）。Mac / Windows 那两台不保证在线，**先不接**；接的时候按下面这条纪律来。
+
+**硬纪律：任何"依赖某台机器在线"的 job 默认必须是关的** ——
+job 一旦被派发就会**一直等** runner 出现（就是那条"等待带有以下标签的运行器"），
+每次 tag 都会留下一条永远不开始的红记录，还得手动取消/重跑。
+
+所以用**仓库变量开关**（方案 B）：
+
+| 平台 | job 写法 | 默认 |
+|---|---|---|
+| Windows（已就绪） | `windows` job + `if: ${{ vars.WINDOWS_RUNNER == 'true' }}` | **关**（不设变量即不派发） |
+| macOS / iOS（待加） | 照抄一个 `macos` job + `if: ${{ vars.MACOS_RUNNER == 'true' }}`；runner 必须是 **host 模式**（Apple 的构建进不了 Linux 容器） | 关 |
+
+**人在线时的操作**：仓库 **Settings → Actions → Variables** 打开对应变量 →
+在 Actions 里对该次运行点 **Re-run**（或手动 `workflow_dispatch`）→ 跑完再把变量关掉。
+
+**为什么不改成"离线补齐脚本"**：那是我提的方案 A（机器上线后查 Release 缺哪个附件、自动构建上传），
+不排队、能自动补，但要多维护一个脚本 + 一个写权限 token。**用户 2026-10-07 选了 B**；
+如果哪天真嫌"每次要手动开变量"麻烦，再按 A 换（脚本形状：查 Forgejo API 的最近 N 个 tag →
+比对 Release 附件名 → 缺哪个构建哪个 → 上传 → 已存在跳过，幂等）。
+
 ## 2. 注册 runner
 
 ### 2.1 Linux runner：标签 = "**标签名 : 用哪个镜像跑**"
