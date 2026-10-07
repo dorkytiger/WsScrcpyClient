@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 /// 原生视频层（macOS / iOS 先行）：让解码结果**直接**进平台视图，绕开 Flutter 合成。
