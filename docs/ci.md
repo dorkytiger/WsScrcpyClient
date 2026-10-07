@@ -307,6 +307,40 @@ printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
 > ⚠️ **以后加了带原生代码（NDK）的插件，就必须换成真 NDK**：把
 > `android-ndk-r<xx>-linux.zip` 解到 `$SDK/ndk/<版本>/`。标记文件只是"项目没有原生代码"的取巧。
 
+#### ★ 第七个坑（2026-10-07 实测）：**插件自己的 buildscript** 仍然去 `dl.google.com`
+
+```
+A problem occurred configuring project ':flutter_secure_storage'.
+> Could not resolve all artifacts for configuration 'classpath'.
+   > Could not resolve com.android.tools.build:gradle:8.5.1.
+      > Could not GET 'https://dl.google.com/dl/android/maven2/.../gradle-8.5.1.pom'
+         > Remote host terminated the handshake
+   > 'kotlin-android' plugin requires one of the Android Gradle plugins.
+```
+
+（最后那条 `kotlin-android` 报错是**连带**的：AGP 的 classpath 没解析出来，插件项目就应用不上 AGP。）
+
+**根因**：插件的 buildscript 仓库写在 **pub-cache 里的插件源码**中，项目自己的 4 个
+`.gradle.kts` 覆盖不到：
+
+```groovy
+// ~/.pub-cache/hosted/pub.dev/flutter_secure_storage-*/android/build.gradle
+buildscript {
+    repositories { google() }                      // ← dl.google.com，这台机器不通
+    dependencies { classpath 'com.android.tools.build:gradle:8.5.1' }
+}
+```
+
+**修法：用 Gradle init script 全局改仓库**（对所有 project 生效，含所有依赖里的插件）——
+`tools/ci/gradle-mirrors.init.gradle`：把 `dl.google.com` / `maven.google.com` /
+`repo.maven.apache.org` / `repo1.maven.org` / `plugins.gradle.org` / `jcenter` **移除**，
+换成阿里云的 google / public / gradle-plugin 三个仓（内容与官方一致：AGP 8.5.1 与
+Kotlin 2.4.0 都实测 200）。三个时机都要挂：`settingsEvaluated`（pluginManagement）、
+`projectsLoaded`（各 project 的 buildscript/repositories）、`afterProject`
+（插件在项目创建**之后**又会声明一次 `google()`）。
+
+安装位置：`$GRADLE_USER_HOME/init.d/10-china-mirrors.gradle`（CI 从检出里拷、镜像里也烤了一份）。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**

@@ -1,0 +1,65 @@
+// 把所有"连不上/被墙"的仓库换成本地镜像（阿里云）。**对所有 project 生效**（含依赖里的插件）。
+//
+// ── 为什么必须用 init script，而不是改项目里的 .gradle.kts ────────────────
+// 插件的 buildscript 仓库写在 **pub-cache 里的插件源码**中。例：
+//   flutter_secure_storage/android/build.gradle
+//     buildscript { repositories { google() }
+//       dependencies { classpath 'com.android.tools.build:gradle:8.5.1' } }
+// 项目自己的 4 个 .gradle.kts 覆盖不到它，实测报：
+//   A problem occurred configuring project ':flutter_secure_storage'.
+//     > Could not resolve com.android.tools.build:gradle:8.5.1.
+//        > Could not GET 'https://dl.google.com/dl/android/maven2/.../gradle-8.5.1.pom'
+//           > Remote host terminated the handshake
+//
+// ── 用法 ────────────────────────────────────────────────────────────────
+//   · CI 里由工作流拷进 $GRADLE_USER_HOME/init.d/10-china-mirrors.gradle；
+//   · 本地手动跑：gradle --init-script tools/ci/gradle-mirrors.init.gradle <task>
+//   · 保留原来的仓库没有意义：这台机器连不上它们（实测 dl.google.com 直接不通），
+//     所以这里把被墙的仓库**移除**、只留镜像（镜像内容与官方一致：AGP 8.5.1、Kotlin 2.4.0 都验过 200）。
+def mirrors = [
+  'https://maven.aliyun.com/repository/google',        // Google Maven：AGP / AndroidX
+  'https://maven.aliyun.com/repository/public',        // Maven Central（+ jcenter 兜底）
+  'https://maven.aliyun.com/repository/gradle-plugin', // Gradle Plugin Portal
+]
+
+def blockedHosts = [
+  'dl.google.com', 'maven.google.com',
+  'repo.maven.apache.org', 'repo1.maven.org',
+  'plugins.gradle.org', 'jcenter.bintray.com', 'repo.gradle.org',
+]
+
+def isMaven = { repo ->
+  repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository
+}
+def isBlocked = { repo ->
+  isMaven(repo) && blockedHosts.contains((repo.url?.host ?: ''))
+}
+def hasMirror = { handler ->
+  handler.any { repo -> isMaven(repo) && (repo.url?.host ?: '') == 'maven.aliyun.com' }
+}
+
+def rewrite = { handler ->
+  handler.removeAll { isBlocked(it) }
+  if (!hasMirror(handler)) {
+    mirrors.each { m -> handler.maven { url = m } }
+  }
+}
+
+settingsEvaluated { settings ->
+  rewrite(settings.pluginManagement.repositories)
+  rewrite(settings.buildscript.repositories)
+}
+
+gradle.projectsLoaded {
+  gradle.rootProject.allprojects { project ->
+    rewrite(project.buildscript.repositories)
+    rewrite(project.repositories)
+  }
+}
+
+// 插件自己的 build.gradle 会在项目创建**之后**再声明一次 google()，
+// 所以项目评估完再扫一遍，确保被墙的仓库最终不在列表里。
+gradle.afterProject { project ->
+  rewrite(project.buildscript.repositories)
+  rewrite(project.repositories)
+}

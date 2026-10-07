@@ -373,6 +373,15 @@ jobs:
           fi
           grep -n "aliyun" android/settings.gradle.kts | head -3
 
+          # ★ 还不够：**插件自己的 buildscript** 写在 pub-cache 的插件源码里（例
+          #   flutter_secure_storage/android/build.gradle 里 google() + AGP 8.5.1），
+          #   项目文件覆盖不到 → 用一个 Gradle init script 对所有 project 生效。
+          GRADLE_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          mkdir -p "$GRADLE_HOME/init.d"
+          cp tools/ci/gradle-mirrors.init.gradle "$GRADLE_HOME/init.d/10-china-mirrors.gradle"
+          echo "已装 init script：$GRADLE_HOME/init.d/10-china-mirrors.gradle（对所有 project 生效）"
+          head -3 "$GRADLE_HOME/init.d/10-china-mirrors.gradle"
+
       - name: 环境体检（失败不拦，只作参考）
         continue-on-error: true
         run: flutter doctor -v

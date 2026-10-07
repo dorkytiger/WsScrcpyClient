@@ -90,6 +90,70 @@ RUN mkdir -p "/opt/dev/android-sdk/ndk/${NDK_VERSION}" \
       > "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties" \
  && cat "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties"
 
+# Gradle 仓库镜像（init script）：对所有 project 生效，**包括 pub-cache 里的插件** ——
+# flutter_secure_storage 的 android/build.gradle 自己声明了 google() + AGP 8.5.1，
+# 项目里的 .gradle.kts 覆盖不到它（实测报 dl.google.com 握手失败）。
+# 内容与仓库里 tools/ci/gradle-mirrors.init.gradle 一致（那边是权威副本，改的话两边一起改）。
+# 上面那份 init script 用 base64 内联（避免 Dockerfile heredoc/引号转义问题）：
+# 解码后的内容 == 仓库里的 tools/ci/gradle-mirrors.init.gradle（那边是权威副本，改时两边一起改）。
+RUN mkdir -p /opt/dev/gradle-home/init.d \
+ && printf '%s' \
+  'Ly8g5oqK5omA5pyJIui/nuS4jeS4ii/ooqvlopki55qE5LuT5bqT5o2i5oiQ5pys5Zyw6ZWc5YOP' \
+  '77yI6Zi/6YeM5LqR77yJ44CCKirlr7nmiYDmnIkgcHJvamVjdCDnlJ/mlYgqKu+8iOWQq+S+nei1' \
+  'lumHjOeahOaPkuS7tu+8ieOAggovLwovLyDilIDilIAg5Li65LuA5LmI5b+F6aG755SoIGluaXQg' \
+  'c2NyaXB077yM6ICM5LiN5piv5pS56aG555uu6YeM55qEIC5ncmFkbGUua3RzIOKUgOKUgOKUgOKU' \
+  'gOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAovLyDmj5Lku7bnmoQgYnVpbGRz' \
+  'Y3JpcHQg5LuT5bqT5YaZ5ZyoICoqcHViLWNhY2hlIOmHjOeahOaPkuS7tua6kOeggSoq5Lit44CC' \
+  '5L6L77yaCi8vICAgZmx1dHRlcl9zZWN1cmVfc3RvcmFnZS9hbmRyb2lkL2J1aWxkLmdyYWRsZQov' \
+  'LyAgICAgYnVpbGRzY3JpcHQgeyByZXBvc2l0b3JpZXMgeyBnb29nbGUoKSB9Ci8vICAgICAgIGRl' \
+  'cGVuZGVuY2llcyB7IGNsYXNzcGF0aCAnY29tLmFuZHJvaWQudG9vbHMuYnVpbGQ6Z3JhZGxlOjgu' \
+  'NS4xJyB9IH0KLy8g6aG555uu6Ieq5bex55qEIDQg5LiqIC5ncmFkbGUua3RzIOimhuebluS4jeWI' \
+  'sOWug++8jOWunua1i+aKpe+8mgovLyAgIEEgcHJvYmxlbSBvY2N1cnJlZCBjb25maWd1cmluZyBw' \
+  'cm9qZWN0ICc6Zmx1dHRlcl9zZWN1cmVfc3RvcmFnZScuCi8vICAgICA+IENvdWxkIG5vdCByZXNv' \
+  'bHZlIGNvbS5hbmRyb2lkLnRvb2xzLmJ1aWxkOmdyYWRsZTo4LjUuMS4KLy8gICAgICAgID4gQ291' \
+  'bGQgbm90IEdFVCAnaHR0cHM6Ly9kbC5nb29nbGUuY29tL2RsL2FuZHJvaWQvbWF2ZW4yLy4uLi9n' \
+  'cmFkbGUtOC41LjEucG9tJwovLyAgICAgICAgICAgPiBSZW1vdGUgaG9zdCB0ZXJtaW5hdGVkIHRo' \
+  'ZSBoYW5kc2hha2UKLy8KLy8g4pSA4pSAIOeUqOazlSDilIDilIDilIDilIDilIDilIDilIDilIDi' \
+  'lIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDi' \
+  'lIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDi' \
+  'lIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKLy8g' \
+  'ICDCtyBDSSDph4znlLHlt6XkvZzmtYHmi7fov5sgJEdSQURMRV9VU0VSX0hPTUUvaW5pdC5kLzEw' \
+  'LWNoaW5hLW1pcnJvcnMuZ3JhZGxl77ybCi8vICAgwrcg5pys5Zyw5omL5Yqo6LeR77yaZ3JhZGxl' \
+  'IC0taW5pdC1zY3JpcHQgdG9vbHMvY2kvZ3JhZGxlLW1pcnJvcnMuaW5pdC5ncmFkbGUgPHRhc2s+' \
+  'Ci8vICAgwrcg5L+d55WZ5Y6f5p2l55qE5LuT5bqT5rKh5pyJ5oSP5LmJ77ya6L+Z5Y+w5py65Zmo' \
+  '6L+e5LiN5LiK5a6D5Lus77yI5a6e5rWLIGRsLmdvb2dsZS5jb20g55u05o6l5LiN6YCa77yJ77yM' \
+  'Ci8vICAgICDmiYDku6Xov5nph4zmiorooqvlopnnmoTku5PlupMqKuenu+mZpCoq44CB5Y+q55WZ' \
+  '6ZWc5YOP77yI6ZWc5YOP5YaF5a655LiO5a6Y5pa55LiA6Ie077yaQUdQIDguNS4x44CBS290bGlu' \
+  'IDIuNC4wIOmDvemqjOi/hyAyMDDvvInjgIIKZGVmIG1pcnJvcnMgPSBbCiAgJ2h0dHBzOi8vbWF2' \
+  'ZW4uYWxpeXVuLmNvbS9yZXBvc2l0b3J5L2dvb2dsZScsICAgICAgICAvLyBHb29nbGUgTWF2ZW7v' \
+  'vJpBR1AgLyBBbmRyb2lkWAogICdodHRwczovL21hdmVuLmFsaXl1bi5jb20vcmVwb3NpdG9yeS9w' \
+  'dWJsaWMnLCAgICAgICAgLy8gTWF2ZW4gQ2VudHJhbO+8iCsgamNlbnRlciDlhZzlupXvvIkKICAn' \
+  'aHR0cHM6Ly9tYXZlbi5hbGl5dW4uY29tL3JlcG9zaXRvcnkvZ3JhZGxlLXBsdWdpbicsIC8vIEdy' \
+  'YWRsZSBQbHVnaW4gUG9ydGFsCl0KCmRlZiBibG9ja2VkSG9zdHMgPSBbCiAgJ2RsLmdvb2dsZS5j' \
+  'b20nLCAnbWF2ZW4uZ29vZ2xlLmNvbScsCiAgJ3JlcG8ubWF2ZW4uYXBhY2hlLm9yZycsICdyZXBv' \
+  'MS5tYXZlbi5vcmcnLAogICdwbHVnaW5zLmdyYWRsZS5vcmcnLCAnamNlbnRlci5iaW50cmF5LmNv' \
+  'bScsICdyZXBvLmdyYWRsZS5vcmcnLApdCgpkZWYgaXNNYXZlbiA9IHsgcmVwbyAtPgogIHJlcG8g' \
+  'aW5zdGFuY2VvZiBvcmcuZ3JhZGxlLmFwaS5hcnRpZmFjdHMucmVwb3NpdG9yaWVzLk1hdmVuQXJ0' \
+  'aWZhY3RSZXBvc2l0b3J5Cn0KZGVmIGlzQmxvY2tlZCA9IHsgcmVwbyAtPgogIGlzTWF2ZW4ocmVw' \
+  'bykgJiYgYmxvY2tlZEhvc3RzLmNvbnRhaW5zKChyZXBvLnVybD8uaG9zdCA/OiAnJykpCn0KZGVm' \
+  'IGhhc01pcnJvciA9IHsgaGFuZGxlciAtPgogIGhhbmRsZXIuYW55IHsgcmVwbyAtPiBpc01hdmVu' \
+  'KHJlcG8pICYmIChyZXBvLnVybD8uaG9zdCA/OiAnJykgPT0gJ21hdmVuLmFsaXl1bi5jb20nIH0K' \
+  'fQoKZGVmIHJld3JpdGUgPSB7IGhhbmRsZXIgLT4KICBoYW5kbGVyLnJlbW92ZUFsbCB7IGlzQmxv' \
+  'Y2tlZChpdCkgfQogIGlmICghaGFzTWlycm9yKGhhbmRsZXIpKSB7CiAgICBtaXJyb3JzLmVhY2gg' \
+  'eyBtIC0+IGhhbmRsZXIubWF2ZW4geyB1cmwgPSBtIH0gfQogIH0KfQoKc2V0dGluZ3NFdmFsdWF0' \
+  'ZWQgeyBzZXR0aW5ncyAtPgogIHJld3JpdGUoc2V0dGluZ3MucGx1Z2luTWFuYWdlbWVudC5yZXBv' \
+  'c2l0b3JpZXMpCiAgcmV3cml0ZShzZXR0aW5ncy5idWlsZHNjcmlwdC5yZXBvc2l0b3JpZXMpCn0K' \
+  'CmdyYWRsZS5wcm9qZWN0c0xvYWRlZCB7CiAgZ3JhZGxlLnJvb3RQcm9qZWN0LmFsbHByb2plY3Rz' \
+  'IHsgcHJvamVjdCAtPgogICAgcmV3cml0ZShwcm9qZWN0LmJ1aWxkc2NyaXB0LnJlcG9zaXRvcmll' \
+  'cykKICAgIHJld3JpdGUocHJvamVjdC5yZXBvc2l0b3JpZXMpCiAgfQp9CgovLyDmj5Lku7boh6rl' \
+  't7HnmoQgYnVpbGQuZ3JhZGxlIOS8muWcqOmhueebruWIm+W7uioq5LmL5ZCOKirlho3lo7DmmI7k' \
+  'uIDmrKEgZ29vZ2xlKCnvvIwKLy8g5omA5Lul6aG555uu6K+E5Lyw5a6M5YaN5omr5LiA6YGN77yM' \
+  '56Gu5L+d6KKr5aKZ55qE5LuT5bqT5pyA57uI5LiN5Zyo5YiX6KGo6YeM44CCCmdyYWRsZS5hZnRl' \
+  'clByb2plY3QgeyBwcm9qZWN0IC0+CiAgcmV3cml0ZShwcm9qZWN0LmJ1aWxkc2NyaXB0LnJlcG9z' \
+  'aXRvcmllcykKICByZXdyaXRlKHByb2plY3QucmVwb3NpdG9yaWVzKQp9Cg==' \
+  | base64 -d > /opt/dev/gradle-home/init.d/10-china-mirrors.gradle \
+ && head -3 /opt/dev/gradle-home/init.d/10-china-mirrors.gradle
+
 # 路径与缓存目录：工作流会优先探测这些（/opt/dev/flutter 等），探测到就不下载
 ENV JAVA_HOME=/opt/dev/jdk \
     ANDROID_SDK_ROOT=/opt/dev/android-sdk \
