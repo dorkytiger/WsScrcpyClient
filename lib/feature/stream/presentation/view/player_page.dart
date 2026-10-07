@@ -23,7 +23,7 @@ import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_vi
 /// 投流页。
 ///
 /// 当前里程碑（M1 + 协议层）已完成：连接、初始信息头解析、视频参数下发、
-/// 断线重连、快捷栏按键；**画面解码**在 M2 接入（见 `FLUTTER_AGENT.md` §5），
+/// 断线重连、快捷栏按键；**画面解码**走 `VideoDecoder` 接口（原生硬解 / web WebCodecs），
 /// 因此这里先渲染会话状态与视频数据统计，并保留日志面板用于排查协议问题。
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
@@ -629,7 +629,7 @@ class _VideoPlaceholder extends StatelessWidget {
                     Text(
                       '已建立投流会话，但还没收到视频数据。\n'
                       '若持续如此，请检查服务端设备端的 scrcpy-server 是否正常'
-                      '（见 FLUTTER_AGENT.md §1），或换一个投流地址重试。',
+                      '（服务端与设备端的 scrcpy-server 是否正常），或换一个投流地址重试。',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onInverseSurface,

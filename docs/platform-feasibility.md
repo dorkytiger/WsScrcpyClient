@@ -575,7 +575,7 @@ WebView 路线（README 已列 ✅）在两端**都已经能用**：`StreamTarge
 **什么时候必须原生解码：**
 
 - **延迟**：WebView 路线多一层页面 + JS 解码调度，端到端延迟通常明显高于
-  MediaCodec/VideoToolbox 直解（`FLUTTER_AGENT.md` §7 的目标是内网 <300ms）；做交互（游戏/拖动）时差别可感；
+  MediaCodec/VideoToolbox 直解（项目目标：内网端到端 <300ms，见 `README.md`）；做交互（游戏/拖动）时差别可感；
 - **交互质量**：网页播放器自带的手势与 Flutter 的 `Listener` 会互相抢；原生路径下画面是普通 `Texture`，
   触摸/滚轮/键盘全由我们自己控制（这正是 M3 已做的那套）；
 - **输入与 UI 一致性**：原生路径才能让快捷栏、日志面板、错误重试、`VideoViewport` 黑边处理
