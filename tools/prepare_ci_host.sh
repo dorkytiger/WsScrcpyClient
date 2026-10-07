@@ -63,6 +63,22 @@ flutter --version
 # linux(宿主) + web + android 三种产物都下好，容器里就不用再下
 flutter precache --linux --web --android || flutter precache || true
 
+# ── 1.5 JDK 17（Gradle/AGP 要一个 JVM；容器里没有，装上就不用每次下 190MB）───
+JDK_DIR="$DEV_DIR/jdk"
+if [ -x "$JDK_DIR/bin/java" ]; then
+  echo "JDK 已存在：$JDK_DIR（跳过下载）"
+else
+  say "下载 Temurin 17 到 $JDK_DIR"
+  tmp="$(mktemp -d)"
+  # Adoptium 的 "latest" 重定向地址：直接跟着 302 拿到 GitHub 上的 tar.gz，不用解析 JSON
+  curl -fSL --retry 3 --retry-delay 2 -o "$tmp/jdk.tar.gz" \
+    "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse"
+  mkdir -p "$JDK_DIR"
+  tar -xzf "$tmp/jdk.tar.gz" -C "$JDK_DIR" --strip-components=1
+  rm -rf "$tmp"
+fi
+"$JDK_DIR/bin/java" -version 2>&1 | head -2
+
 # ── 2. Android SDK ───────────────────────────────────────────────────────
 say "准备 Android SDK 到 $SDK_DIR"
 mkdir -p "$SDK_DIR/platforms" "$SDK_DIR/build-tools" "$SDK_DIR/licenses"
@@ -94,7 +110,7 @@ echo "    ✓ 许可文件已写"
 
 # ── 3. 汇总 ─────────────────────────────────────────────────────────────
 say "准备好啦 —— 各目录大小"
-du -sh "$FLUTTER_DIR" "$SDK_DIR" "$DEV_DIR/gradle-home" "$DEV_DIR/pub-cache"
+du -sh "$FLUTTER_DIR" "$JDK_DIR" "$SDK_DIR" "$DEV_DIR/gradle-home" "$DEV_DIR/pub-cache"
 cat <<'TIP'
 
 下一步（在 Forgejo runner 的 compose / runner-config.yml 里挂进容器）：

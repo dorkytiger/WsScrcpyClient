@@ -396,7 +396,22 @@ docker compose up -d        # 让配置生效
   `GRADLE_USER_HOME` / `PUB_CACHE` 指过去（Gradle 依赖与 pub 包也不再每次重下），
   挂了只读或没挂就退回容器内缓存。
 
-### ④ 两个注意点
+### ④ JDK 也放进挂载目录（别用 `actions/setup-java`）
+
+`oci/node:20-bookworm` 里**没有 JDK**，而 Gradle/AGP 自己要一个 JVM —— 不装的话
+`flutter build apk` 第一步就报 `Unable to locate a Java Runtime`。
+原来用 `actions/setup-java@v4`：它每次从 `api.adoptium.net` → github releases 下
+**~190MB** Temurin（实测 **1m28s**，而且工具缓存落在临时容器里，下个 job 还得再下）。
+
+现在：工作流的 JDK 步骤**优先用 `$CI_HOST_DIR/jdk`**（`prepare_ci_host.sh` 会装好），
+没有才回退下载 —— 回退时用 Adoptium 的 **"latest" 重定向地址**，一次 `curl -fSL` 直接拿到
+tar.gz，不需要 `jq`/`python` 解析版本 JSON：
+
+```
+https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse
+```
+
+### ⑤ 两个注意点
 
 1. **挂载要可写**（不要加 `:ro`）：Flutter 运行时会写 `bin/cache`，Gradle/pub 缓存也要写。
    代价是容器以 root 跑，**写进去的新文件属主是 root**；宿主机上想继续用这些目录时

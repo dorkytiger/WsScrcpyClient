@@ -175,11 +175,30 @@ jobs:
             apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
           fi
 
-      - name: 装 JDK 17（Gradle 要求）
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - name: 装 JDK 17（优先用宿主机挂进来的，没有才下）
+        # Gradle/AGP 自己要一个 JVM 才能跑，而 oci/node:20-bookworm 里没有 JDK ——
+        # 不装的话 `flutter build apk` 第一步就报 "Unable to locate a Java Runtime"。
+        # 原来用 actions/setup-java@v4：它每次都从 api.adoptium.net → github releases
+        # 下 ~190MB Temurin（实测 1m28s，而且工具缓存落在临时容器里，下个 job 还得再下）。
+        # 现在优先用挂载目录里的 $CI_HOST_DIR/jdk（见 tools/prepare_ci_host.sh）。
+        # 回退路径用 Adoptium 的 "latest" 重定向地址，不需要 jq/python 解析 JSON。
+        run: |
+          set -e
+          if [ -x "$CI_HOST_DIR/jdk/bin/java" ]; then
+            JAVA_HOME="$CI_HOST_DIR/jdk"
+            echo "用已存在的 JDK：$JAVA_HOME"
+          else
+            JAVA_HOME=/opt/jdk
+            echo "下载 Temurin 17（~190MB）…"
+            curl -fSL --retry 3 --retry-delay 2 -o /tmp/jdk.tar.gz \
+              "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse"
+            mkdir -p "$JAVA_HOME"
+            tar -xzf /tmp/jdk.tar.gz -C "$JAVA_HOME" --strip-components=1
+            rm -f /tmp/jdk.tar.gz
+          fi
+          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME/bin" >> "$GITHUB_PATH"
+          java -version
 
       - name: 缓存目录（挂载可用时，Gradle/pub 依赖也不用每次重下）
         run: |
