@@ -579,18 +579,21 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 否则面板那条复现不出来）。两条回归测试都做过 A/B：**改回老结构 → 红，修复版 → 绿**。
 （占位那条老代码溢出 28px；面板那条只有加上安全区才复现。）
 
-#### macOS 上自动化验证的一个坑（和产品无关，但会浪费你半小时）
+#### macOS 上"密码只本次会话有效"（`-34018`）：**已修**，见 §16.1
 
-`flutter run/build` 出来的 macOS debug 包是 **ad-hoc 签名**，**每次重建签名都会变**，
-Keychain 的 ACL 就对不上了 → `flutter_secure_storage` 写不进去（按 §7 的设计**不报错**，
-密码只留在内存），于是**下一次启动** `ensureProfile` 看到"已有配置"就不覆盖（它的设计是
-"不覆盖用户自己填的东西"）→ 没有密码 → **设备列表报"握手被拒绝"**，
-而 `curl -u` 却是 **200**。
+`flutter run/build` 出来的 macOS debug 包是 **ad-hoc 签名**（`CODE_SIGN_IDENTITY = "-"`，
+实测 `TeamIdentifier=not set`），而 `flutter_secure_storage_macos` 9.x 默认走
+**data protection keychain**（`kSecUseDataProtectionKeychain = true`）——那个钥匙串要求
+进程带 `keychain-access-groups` / `com.apple.application-identifier` 授权，**只有
+provisioning profile 能给**，于是每次写入都返回 `-34018 errSecMissingEntitlement`。
+按 §7 的设计这不会报错（密码留在内存），于是**下一次启动**看不到密码 →
+**设备列表报"握手被拒绝"**，而 `curl -u` 却是 **200**。
 
-**排查时先记住这一条**：这不是服务端/凭据的问题，删掉应用数据目录再跑即可：
+**根因、修法与实测证据都在 §16.1**（一句话：`MacOsOptions(useDataProtectionKeyChain: false)`）。
+另外那个应用数据目录在**沙箱容器**里，不在 `~/Library/Application Support/`：
 
 ```bash
-rm -rf "$HOME/Library/Application Support/com.example.wsScrcpyClient"
+rm -rf "$HOME/Library/Containers/com.example.wsScrcpyClient/Data/Library/Application Support/com.example.wsScrcpyClient"
 ```
 
 另外**别指望用 `defaults write … "NSWindow Frame MainFlutterWindow"` 来改 macOS 窗口尺寸**
@@ -986,9 +989,31 @@ this.bitrate=0; this.bounds=null; this.maxFps=0; this.iFrameInterval=0;
 this.sendFrameMeta=!1; this.lockedVideoOrientation=-1; this.displayId=0
 ```
 
-**因此 `maxFps: 0` 不是我们的发明**——网页端也这么发（曾经把它当成"帧率低"的嫌疑犯是**误判**，
-已纠正）。以前我们自己塞的 `bitrate 8000000 / iFrameInterval 10` 才是"我们自己编的值"，
-已删除，改为逐字段回显服务端 / 按上表回落。
+**⚠️ 这一段的最后一句 2026-10-07 被推翻了**（保留原文以便看清楚当时错在哪）：
+
+- 上面那段"默认构造全 0"说的是 bundle 里 **`VideoSettings` 的构造函数**，没错；
+- 但**网页端真正发出去的不是构造函数的默认值，而是各播放器的 `preferredVideoSettings`**。
+  2026-10-07 把 `bundle.js` 拉下来读到了原文：
+
+  ```js
+  // 默认播放器 mse
+  MsePlayer.preferredVideoSettings = {lockedVideoOrientation:-1, bitrate:7340032,
+                                     maxFps:60, iFrameInterval:10, bounds:Size(720,720), sendFrameMeta:false}
+  // 另外两个播放器（tinyh264 / base）
+  BasePlayer.preferredVideoSettings = {..., bitrate:524288, maxFps:24, iFrameInterval:5, bounds:Size(480,480)}
+  ```
+
+  所以 §6.2 里服务端初始头出现过的 `bitrate 7340032 / maxFps 60 / iFrameInterval 10`
+  **就是网页端自己发的**，不是"服务端给的"。我们当年"逐字段回显 0"的结论对
+  `maxFps` 那种误判是纠正了，但**把 bitrate 也一起清零是过头了**：
+  实测（2026-10-07 手机端日志）我们发 `bitrate 0 / maxFps 0` 时平均只有
+  **~0.6 Mbps / ~11fps**，画面又软又块，而网页端要的是 **7 Mbps / 60fps**。
+
+- **现行做法**（`StreamSessionService.withWebPlayerPreferredDefaults`）：
+  **服务端给了就回显服务端**（§6.2 的反馈循环教训不变），
+  **服务端没给（0 / null）就照抄网页端 MSE 播放器的首选值**。
+  测试：`video_bounds_clamp_test.dart` 里"★ 发出去之前用网页端 MSE 播放器的首选值补齐"
+  与"★ 服务端给了的字段必须原样回显"。
 
 **验收（下次真机运行）**：
 1. 日志里 `请求的编码边界 … 超过设备原生 … 收敛为 …` 出现且**收敛值 ≤ 1280×720**；
@@ -1440,4 +1465,211 @@ videoChannel = ScrcpyVideoChannelHandler(
    `could not create image from display`，且**不会**弹窗提示——别误判成"App 没窗口"。
    （iOS 模拟器那条 `xcrun simctl io booted screenshot` 走的是 simctl，不受这个限制。）
 
+---
 
+## 16. 2026-10-07：macOS 安全存储、拉伸窗口丢输入、清晰度开关
+
+### 16.1 macOS 密码写不进钥匙串（`-34018`）——已修
+
+**现象**（用户贴回来的日志）：
+
+```
+[SecretLocalDatasource] 写入安全存储失败，密码仅在本次会话有效
+  | cause: PlatformException(Unexpected security result code, Code: -34018,
+           Message: A required entitlement is not present., -34018, null)
+```
+
+**根因（读代码 + 本机探针，不是猜）**：
+
+1. `flutter_secure_storage_macos` 3.1.3 的 `MacOsOptions` 默认
+   `useDataProtectionKeyChain = true`（`lib/options/macos_options.dart`），
+   它进到 `FlutterSecureStorage.swift` 的 `baseQuery` 就是
+   `kSecUseDataProtectionKeychain = true`；
+2. 数据保护钥匙串要求 `keychain-access-groups` / `com.apple.application-identifier`，
+   这两样只能由 provisioning profile 提供；而 Runner 是 **ad-hoc 签名**
+   （`macos/Runner.xcodeproj/project.pbxproj` 里 `CODE_SIGN_IDENTITY = "-"`，
+   `codesign -dv` 实测 `TeamIdentifier=not set`）→ `SecItemAdd` 直接 `-34018`。
+
+**本机探针（`.tmp/`，不属于仓库）**：一个最小 `.app`（同款 `com.apple.security.app-sandbox`
+授权 + ad-hoc 签名）分别调两种查询：
+
+| 查询 | 结果 |
+|---|---|
+| `kSecUseDataProtectionKeychain = true` | `-34018 A required entitlement is not present.` |
+| 不带该键（= 文件式 login 钥匙串） | `add / read / delete` 全部 `0`，无弹框 |
+
+**还额外验了"重建之后还能不能读"**（ad-hoc 每次重建 cdhash 都变，是以前的疑点）：
+v1 写入 → 改一个字符串常量重新编译+重签名（cdhash 变了）→ v2 读，仍然
+`SecItemCopyMatching -> 0 value=acl-probe-value`。**没有授权弹框，没有 ACL 失败。**
+
+**修法**：`lib/app/app_scope.dart` 里把安全存储选项集中成 `appSecureStorage`，
+macOS 显式关掉数据保护钥匙串：
+
+```dart
+const FlutterSecureStorage appSecureStorage = FlutterSecureStorage(
+  aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+);
+```
+
+**门禁**：`test/app/app_scope_test.dart` 钉住这两个选项（改回默认就变红）。
+**未完成**：用真实服务端跑一次"创建配置 → 重启 → 设备列表能拉到"的端到端复验
+（本会话里被打断，代码与机制两层证据已经齐了）。
+
+### 16.2 ★ 拉伸窗口后"没法操控"：每帧一条编码参数把服务端编码器刷爆了
+
+**现象**（用户原话）："当我拉伸应用大小，或者点击铺满屏幕后，就无法操控了"。
+
+**先把它变成数字**：新增的回归测试
+`test/feature/stream/player_page_test.dart` → "★ 拖动窗口连续改变尺寸：最多补发 1 条编码参数"，
+模拟桌面窗口拖动 20 帧（每帧一个新尺寸，总共约 0.3 秒），数
+`CHANGE_STREAM_PARAMETERS` 的条数：
+
+- **修之前：20 条**（旧断言红：`Expected: a value less than or equal to <1> / Actual: <20>`）；
+- **修之后：1 条**（最终尺寸），而且拉伸后点画面仍然发得出 down/up。
+
+**根因**：`_VideoStage` 的 `LayoutBuilder` 每次布局都把控件尺寸报给
+`PlayerViewModel.applyViewportSize`，而拖窗口时**每帧尺寸都不同**，
+`StreamSessionService.applyViewportBounds` 里的"相同尺寸去重"**只挡重复、挡不住变化** →
+每帧下发一条 `CHANGE_STREAM_PARAMETERS` → 服务端每收一条就重建一次编码器；
+重建后不会立刻出 IDR，画面停住/发黑，用户看到的就是"点不动"
+（这个失败模式 §6.2 / §12.5 都记过，只是这次的触发源是"窗口拖动"）。
+
+**修法**（`PlayerViewModel`）：首个尺寸照旧**立刻**上报（首发要一次到位，§12.5），
+之后尺寸变化**合并 + 防抖 350ms**（`kViewportSettleDelay`，与网页壳那条 resize 防抖对齐）
+再下发一条；尺寸没变时什么都不做。
+
+**"铺满屏幕"那条**：`VideoFitMode` 只改本地渲染与坐标换算，**不发任何协议消息**
+（有测试 `★ 横屏 + 铺满：原本的黑边还能点` 守着）。所以如果单独切"铺满"也出现
+"点不动"，请看 §16.4 的 `[Input]`/`输入层` 日志——那说明是**另一条**原因，
+不要和这条混在一起。
+
+#### 16.2.1 ★★ 同一个坑的第二、第三条入口：**手机转屏**与"去重键选错了"
+
+**用户原话**："手机端，我旋转一下屏幕，就点不了了"、"旋转后，再点击，会卡个几十秒左右，
+才有反应，才能重新点击"。
+
+**日志给出的第一手证据**（用户贴回来的 `[Input]`/`[Viewport]` 行）：
+
+- `黑边丢弃 0 条`、每条都是 `结果=已发`，坐标换算自洽（`控件内=(202.0,433.3) → 视频=(643,629)`，
+  反解出的 scale/offset 与 `画面诊断` 里的数字完全一致）→ **触摸这条路没问题**；
+- `画面诊断：视频 1280x720 … 生效编码边界 1200x672` 之后又出现 `视频 1184x672`
+  → 说明**服务端确实重建过编码器**（尺寸变了）。
+- `iFrameInterval = 10`（服务端给的参数，§12.7）→ 编码器重建后要等新的 IDR，
+  **最坏 10 秒**；重建两三次就是用户说的"几十秒"。这就是 stall 的机制。
+
+**根因（两条，都在共享 Dart 层）**：
+
+1. 转屏时"按设备比例内接于视口"的框从竖屏 `1200x672` 跳到横屏 `1280x720`，
+   **每跳一次就是一条 `CHANGE_STREAM_PARAMETERS`**；
+2. 更隐蔽的一条：`applyViewportBounds` 的**去重键用的是"UI 报上来的原始尺寸"**，
+   而转屏时原始尺寸每次都不同（`1206x2094` ↔ `2622x1206`）——哪怕收敛后**完全一样**
+   也照样发消息。
+
+**修法（两条一起才成立）**：
+
+- **吸附到原生**：`clampBoundsForMode` 里 `nativeCap` 模式多一步——视口按设备比例收框后
+  宽度达到原生的 `snapToNativeRatio = 0.9`，就直接要**原生**。转屏后两个方向都收敛成
+  `1280x720`（iPhone 竖屏 1206x2094 → 94% ≥ 90%），于是**边界根本不变**；
+  代价是多要不到 23% 的像素，且只对"已经贴着原生"的视口生效（`999x601 → 992x560`
+  这类明显更小的视口仍然不放大，AGENTS §12.7 不变）。
+- **去重键改成"收敛后的生效边界"**：`_lastViewportBounds` 现在记的是
+  `clampBoundsForMode` 的结果。于是"原始尺寸变了、生效边界没变"→ **一条消息都不发**。
+
+**实测口径（下次复验就看这两行）**：转屏前后
+`视口诊断：本秒控件布局 N 次，真正下发编码参数 M 条` 里的 **M 必须是 0**，
+`画面诊断：…生效编码边界 …` 必须**一直是 1280x720**。
+
+**回归测试**：
+`stream_session_service_test.dart` 的 `★ 转屏不改编码边界：一条消息都不发`（断言
+`viewportUpdateSequence == 0` 且报文条数不增）、
+`video_bounds_clamp_test.dart` 的 `★ 转屏（竖 1206x2094 ↔ 横 2622x1206）收敛成同一个边界`、
+`player_page_test.dart` 的拖动窗口那条测试里**追加了"转屏 16 帧"**一段（断言最多补发 1 条）。
+
+**顺带修掉的**：首发用服务端给的边界时，收敛结果常常就等于 UI 想要的（都是原生），
+现在这种"等价补发"会被去重吃掉 —— 少一次编码器重建（测试
+`UI 尺寸晚于初始信息头：兜底那条等价时不再补发` 钉住）。
+
+#### 16.2.2 横屏右侧快捷栏"太松散"（用户："右边按钮区域太松散了"）
+
+`_QuickBar` 竖排原来用 `MainAxisAlignment.spaceEvenly`，而横屏时这一列会拿到整屏高度 →
+4 个按钮被摊到 ~400 点里，看着散、拇指也够不着。改成**居中一小组**
+（`Center` + `Column(mainAxisSize.min, spacing: AppSpacing.xs)`），
+按钮在竖排时走 `compact`：内边距 `4/2`、图标 `AppIconSize.md`，
+但**最小可点区域仍然 44x44**（无障碍底线）。回归断言：
+`player_page_test.dart` 里"4 个按钮的竖向跨度 < 200"。
+
+### 16.3 清晰度：网页端更清楚，是因为它把**视口尺寸**直接当编码边界
+
+**用户原话**："ws 自带的网页端的清晰度完爆桌面端的"。
+
+**把网页端的做法读出来**（`curl -u … https://android.dorkytiger.top/bundle.js`，740 KB，
+只读不改）：
+
+```js
+getMaxSize = function () {
+  var e = document.body,
+      t = e.clientWidth - this.controlButtons.clientWidth & -16,   // 对齐 16
+      r = -16 & e.clientHeight;
+  return new Size(t, r);
+};
+… a.player.setVideoSettings(i, a.fitToScreen, !1) …
+```
+
+也就是说：网页端把 **CSS 像素的视口尺寸**当 `bounds` 发过去，**既不乘 DPR、也不按设备原生封顶**。
+我们的旧行为是"一律封顶到设备原生"（§12.7 的取舍），于是在大窗口 / Retina 上
+只能拿到 1280x720，再靠本地放大 2 倍以上——同一个流，放大倍数越大越糊。
+
+**新增开关 `VideoBoundsMode`**（`lib/feature/stream/enum/video_bounds_mode.dart`）：
+
+| 模式 | bounds 上限 | 默认 |
+|---|---|---|
+| `nativeCap`（省设备算力） | 设备原生 + "贴原生就吸原生"（§16.2.1） | 手动切回时用（转屏不改边界的退路） |
+| `viewport`（清晰优先） | 原生 ×2（`VideoBoundsMode.maxUpscale`） | **全部平台默认**（2026-10-07 用户要求） |
+
+**为什么默认改成清晰优先（用户实测的原话级证据）**：手机横屏时画面区物理 `2280x1206`，
+而 `nativeCap` 封顶在设备原生 `1280x720` → `画面诊断` 里 `**本地放大 1.68x**`（就是糊）；
+切到清晰优先后请求 `2144x1200`（≈ 画面区物理像素）→ 放大倍率才能回到 ~1.0。
+日志里的两行就是判据：`请求的编码边界 2280x1206 收敛/对齐为 2144x1200（模式=清晰优先…）`
+与 `画面诊断…生效编码边界 2144x1200`。
+
+**清晰度的另一半是码率/帧率（2026-10-07 同一天查出）**：日志里
+`VideoSettings(bitrate: 0, maxFps: 0, iFrameInterval: 0, …)` 说明服务端那次初始头是 `null`，
+我们就发了 0 = "让服务端自己定"；而网页端默认播放器自己带的是
+`bitrate 7340032 / maxFps 60 / iFrameInterval 10`（bundle 原文见 §12.7 的更正）。
+现在改成"服务端没给就照抄网页端"，测试见 `video_bounds_clamp_test.dart`。
+复验判据：`WS 帧吞吐/s` 的平均**字节/帧**应当明显上升（不再是一帧 6~7 KB），
+画面在大面积变化（滚动、切页）时不再发块。
+
+**两条模式在"转屏"上的差别（要记住）**：
+- `nativeCap`：贴原生会**吸附**，竖/横两向都收敛成原生 → 转屏**一条消息都不发**（§16.2.1）；
+- `viewport`：竖屏 `1200x672` ↔ 横屏 `2144x1200` **不一样** → 转屏会补发一条、
+  服务端重建一次编码器。想要"转屏完全不动"就切回 `nativeCap`，想要"横屏更清楚"就用默认值。
+
+两种模式都保留"与设备同比例收框"（§15.7）和"16 宏块对齐"（§12.8）——
+那两个是硬要求，与"清晰度取舍"无关。切换会**立刻**补发一条参数（否则用户点了看不见变化），
+入口在投流页"更多"面板里的「清晰优先（按画面区像素编码）」。
+
+**默认值按平台分**：桌面 `viewport`（用户要的就是网页端那种清楚），
+移动端保持 `nativeCap`（§12.7 那次"帧间隔 53–166ms"就是在 iOS 上量的，不替手机用户翻案）。
+
+**还没有的**：`viewport` 模式在真实设备上的帧率数据。日志里
+`帧吞吐/s：发起 +N` 与原生心跳的 `帧间隔` 就是判据；如果掉帧明显，把开关关掉即可。
+
+### 16.4 ★ 排查这两个问题先看哪几条日志（都是这次加的）
+
+| 日志 | 在哪 | 说明 |
+|---|---|---|
+| `视口诊断：本秒控件布局 N 次，真正下发编码参数 M 条…` | `[Viewport]`（每秒一条） | M 接近 N（几十）就是**窗口拖动风暴**；修好后拖动中也只有 1 条 |
+| `画面诊断：视频 WxH，fit=…，生效编码边界 WxH，控件 … 逻辑 = … 物理，绘制 …，**本地放大 x.xx 倍**，输入层=接上/断开` | `[Viewport]` | 一条日志回答"为什么糊"（放大倍数 >1 就会糊）与"为什么点不动"（`输入层=断开`） |
+| `输入层已接上 / 输入层**未接上**（原因=…）` | `[Input]` | 只在状态翻转时打。**未接上**= 事件根本没到 `Listener`（视图层问题）；接上了却仍没反应，就往下看逐条事件 |
+| `原始 down/up id=… 控件内=(x,y) → 视频=(x,y)`、`… → 丢弃（黑边…）`、`忽略 down id=…`、`每秒统计：down/move/up/发出/重复/黑边丢弃` | `[Input]` | 事件到没到、换算成什么、有没有被状态机丢掉 |
+| `服务端初始头给的 VideoSettings：…`、`请求的编码边界 … 收敛/对齐为 …（模式=…）`、`首发视频参数…` | service | 设备原生多少、我们请它编多少、服务端给的是什么 |
+| **每行日志都以 `HH:mm:ss.SSS` 开头**（2026-10-07 加） | 全部 | "卡了几十秒"只能靠**时间缺口**判定：每秒一条的 `每秒统计`/`帧吞吐/s` 断了几十秒 = 我们自己的 UI/引擎卡住；这些行一直没断、只有画面不动 = 卡在视频管线（服务端没给帧 / 解码器没解出来，看原生 `ScrcpyVideoDecoder` 心跳的 `已喂入 / 已解出`） |
+
+**判据**：
+- 拖窗口后**画面停住 + `视口诊断` 里 M 是几十** → §16.2 这条（已修，若再现说明防抖被破坏）；
+- 切"铺满"后点不动，且 `[Input]` 里**一条 down 都没有** → 事件没到 `Listener`（看 `输入层` 那行）；
+  有 down 但 `→ 丢弃（黑边…）` → 坐标换算与渲染不一致；
+- 画面糊 → 看 `本地放大 x.xx 倍`：>1 就是被本地拉大，配合 `生效编码边界` 判断
+  是"设备只给这么多像素"还是"我们要得太少"（后者就是 §16.3 的开关）。

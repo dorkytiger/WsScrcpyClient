@@ -18,6 +18,7 @@ import 'package:ws_scrcpy_client/feature/stream/application/service/stream_sessi
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/native_video_decoder.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
+import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 
 /// 投流页视图模型：会话三态 + 原生解码（M2 路线 A：Android / Windows）。
 ///
@@ -41,6 +42,9 @@ class PlayerViewModel extends ChangeNotifier {
 
   /// 输入链路诊断（用户报告的"点一次触发两次 / 总差上一次"靠这几条定性）。
   final AppLogger _inputLogger = AppLogger('Input');
+
+  /// 视口/画面诊断（"拉伸窗口下发过密吗""本地放大了几倍""输入层挂上了吗"）。
+  final AppLogger _viewportLogger = AppLogger('Viewport');
 
   /// 触摸指针状态机：保证每个 DOWN 都有配对的 UP（黑边上丢掉 UP 会把设备端卡住，
   /// 见 [TouchPointerTracker] 的注释）。
@@ -109,6 +113,18 @@ class PlayerViewModel extends ChangeNotifier {
   /// 是否正在等待解码器创建完成。
   bool get isDecoderCreating => _decoderCreating;
 
+  /// 编码边界策略的默认值：**清晰优先**（桌面与移动一样）。
+  ///
+  /// 2026-10-07 用户实测（手机横屏）：画面区物理 `2280x1206`，而"省设备算力"把边界封顶在
+  /// 设备原生 `1280x720` → 本地放大 **1.68x**（糊）；切到清晰优先后请求 `2144x1200`
+  /// （≈ 画面区的物理像素），放大倍率才会回到 ~1.0。
+  /// 桌面端同理（"网页端完爆桌面端"就是它按自己的视口尺寸要像素）。
+  ///
+  /// 风险与退路：AGENTS §12.7 记过"向设备要更多像素 → 帧间隔 53–166ms"，
+  /// 所以"更多"面板里保留一键切回 `nativeCap`；日志里的
+  /// `帧吞吐/s：收到 +N` 与 `画面诊断…本地放大 x.xx 倍` 就是判据。
+  VideoBoundsMode get defaultBoundsMode => VideoBoundsMode.viewport;
+
   /// 是否在连接建立后自动唤醒被控设备屏幕（默认开，见 `AppDefaults.wakeDeviceOnConnect`）。
   bool get wakeOnConnect => _sessionService.wakeOnConnect;
 
@@ -140,6 +156,20 @@ class PlayerViewModel extends ChangeNotifier {
     _lastError = null;
     _decoderError = null;
     _decoderUnavailable = false;
+    // 编码边界策略按平台默认（桌面=清晰优先，移动=省设备算力；见 defaultBoundsMode）。
+    // 这时候还没发过首发参数，所以只是记下来，不会额外发消息。
+    _sessionService.setBoundsMode(defaultBoundsMode);
+    // 新会话：把诊断的"变了才打"缓存清掉，让第一条画面诊断一定打出来。
+    _lastRenderDiagnosticsSignature = null;
+    _viewportStatsWindowStart = null;
+    _viewportLayoutCallsInWindow = 0;
+    _viewportSettleTimer?.cancel();
+    _viewportSettleTimer = null;
+    _pendingViewportSize = null;
+    _viewportReportedOnce = false;
+    _lastReportedViewportSize = null;
+    _viewportSettingsSent = 0;
+    _viewportSettingsSentInWindow = 0;
     _state = const AsyncLoading();
     _notify();
 
@@ -200,16 +230,200 @@ class PlayerViewModel extends ChangeNotifier {
   /// 为什么**不**在这里做"已连接"判断：首发视频参数要**一次到位**（带上最终 bounds），
   /// 而这一步往往发生在初始信息头到达之前——必须在连接前就把尺寸记下来，
   /// service 才能"拿到 display 时就带着它发一条"（连发两条会让服务端重建两次编码器 → 黑屏）。
+  ///
+  /// **★ 防抖（2026-10-07 修）**：拖动窗口时 Flutter **每帧**都会调它一次，而每帧尺寸都不同
+  /// （实测：0.3 秒的拖动 = 20 个不同尺寸），service 里的"相同尺寸去重"**挡不住**——
+  /// 结果是每帧下发一条 `CHANGE_STREAM_PARAMETERS`，服务端每收一条就重建一次编码器；
+  /// 重建后不会立刻出 IDR，画面就停住/发黑，用户看到的是"拉伸窗口后没法操控了"
+  /// （这个失败模式 AGENTS §6.2 / §12.5 都记过）。
+  ///
+  /// 规则：
+  /// - **本会话第一次**上报立刻生效（首发要带着最终尺寸一次到位，不能等）；
+  /// - 之后尺寸变化只在**停稳 [kViewportSettleDelay] 后**合并成一条下发；
+  /// - 尺寸没变（纯布局回调）什么都不做，避免拖动结束后还被反复触发。
   void applyViewportSize(Size logicalSize, double devicePixelRatio) {
+    _lastViewLogicalSize = logicalSize;
+    _lastViewDevicePixelRatio = devicePixelRatio;
+    final size = VideoSize(
+      (logicalSize.width * devicePixelRatio).round(),
+      (logicalSize.height * devicePixelRatio).round(),
+    );
+    _viewportLayoutCallsInWindow++;
+
+    if (size.width > 0 && size.height > 0) {
+      if (!_viewportReportedOnce) {
+        _viewportReportedOnce = true;
+        _reportViewportSize(size);
+      } else if (size != _lastReportedViewportSize &&
+          size != _pendingViewportSize) {
+        // 尺寸真的在变（多半是在拖窗口）：合并，等停稳再发一条。
+        _pendingViewportSize = size;
+        _viewportSettleTimer?.cancel();
+        _viewportSettleTimer = Timer(kViewportSettleDelay, _flushPendingViewport);
+      }
+    }
+    _maybeLogViewportStats(DateTime.now());
+    _maybeLogRenderDiagnostics();
+  }
+
+  /// 窗口拖动/旋转的"停稳"宽限期（与网页壳那条约 350ms 的 resize 防抖对齐）。
+  static const Duration kViewportSettleDelay = Duration(milliseconds: 350);
+
+  bool _viewportReportedOnce = false;
+  VideoSize? _lastReportedViewportSize;
+  VideoSize? _pendingViewportSize;
+  Timer? _viewportSettleTimer;
+
+  /// 把合并后的尺寸交给 service（真正决定发不发在 service：同尺寸会去重）。
+  void _reportViewportSize(VideoSize size) {
+    _lastReportedViewportSize = size;
     final result = _sessionService.applyViewportBounds(
-      width: (logicalSize.width * devicePixelRatio).round(),
-      height: (logicalSize.height * devicePixelRatio).round(),
+      width: size.width,
+      height: size.height,
     );
     if (result.isError) {
       _logs.add('更新画面尺寸失败：${result.error!.message}');
       _notify();
+    } else if (result.data == true) {
+      _viewportSettingsSent++;
     }
   }
+
+  void _flushPendingViewport() {
+    _viewportSettleTimer = null;
+    final pending = _pendingViewportSize;
+    _pendingViewportSize = null;
+    if (pending == null || _disposed) {
+      return;
+    }
+    _reportViewportSize(pending);
+    _maybeLogRenderDiagnostics();
+  }
+
+  /// 最近一次 UI 报上来的画面控件尺寸（逻辑像素）与设备像素比。
+  Size? _lastViewLogicalSize;
+  double _lastViewDevicePixelRatio = 1;
+
+  /// 诊断计数：真正下发编码参数的次数（累计 / 本窗口），以及本窗口的布局次数。
+  int _viewportSettingsSent = 0;
+  DateTime? _viewportStatsWindowStart;
+  int _viewportLayoutCallsInWindow = 0;
+  int _viewportSettingsSentInWindow = 0;
+
+  /// 每秒一条的视口诊断（只在那一秒真的有布局回调时打）。
+  ///
+  /// 判据：
+  /// - `布局 N 次 / 下发 M 条`，N 与 M 都接近每秒帧数 → **窗口拖动风暴**（编码器会被反复重建）；
+  /// - `下发 0 条` → 尺寸没变（旋转/缩放结束后的稳定态）；
+  /// - 拉伸窗口后画面卡住/点不动时，先看这一秒里 M 是不是几十。
+  void _maybeLogViewportStats(DateTime now) {
+    _viewportStatsWindowStart ??= now;
+    _viewportLayoutCallsInWindow++;
+    if (now.difference(_viewportStatsWindowStart!).inMilliseconds < 1000) {
+      return;
+    }
+    final sentInWindow = _viewportSettingsSent - _viewportSettingsSentInWindow;
+    final logical = _lastViewLogicalSize;
+    final line =
+        '视口诊断：本秒控件布局 $_viewportLayoutCallsInWindow 次，'
+        '真正下发编码参数 $sentInWindow 条，'
+        '控件 ${logical == null ? '未知' : '${logical.width.toStringAsFixed(0)}x'
+            '${logical.height.toStringAsFixed(0)} 逻辑'}'
+        '@${_lastViewDevicePixelRatio.toStringAsFixed(2)}x，'
+        '生效编码边界 ${_boundsText(_sessionService.lastEffectiveBounds)}'
+        '${_pendingViewportSize == null ? '' : '，待停稳后下发 '
+            '${_pendingViewportSize!.width}x${_pendingViewportSize!.height}'}'
+        '${sentInWindow >= 5 ? ' ⚠ 下发过密：服务端每收一条就重建一次编码器' : ''}';
+    _appendLog(line);
+    _viewportStatsWindowStart = now;
+    _viewportLayoutCallsInWindow = 0;
+    _viewportSettingsSentInWindow = _viewportSettingsSent;
+  }
+
+  static String _boundsText(VideoSize? size) =>
+      size == null ? '未知' : '${size.width}x${size.height}';
+
+  /// 画面/输入层的诊断：视频像素、控件物理像素、**本地放大倍率**、坐标换算参数、输入层是否接上。
+  ///
+  /// 只在"这几个数变了"时打一条，避免刷屏。它同时回答两件事：
+  /// - **为什么糊**：`本地放大 x.x 倍` > 1 就说明我们把 1280x720 拉到了更大的物理区域上
+  ///   （同一个流，画面区越大越糊），对照 `生效编码边界` 就知道服务端给了多少像素；
+  /// - **为什么点不动**：`输入层=断开` 那一行就是"点在画面上不会有任何消息发出去"的直接证据。
+  void _maybeLogRenderDiagnostics() {
+    final logical = _lastViewLogicalSize;
+    final size = _videoSize ?? snapshot.display?.displayInfo.size;
+    final viewport = logical == null
+        ? null
+        : viewportFor(viewWidth: logical.width, viewHeight: logical.height);
+    final sizeText = size == null ? '未知' : '${size.width}x${size.height}';
+    final fitText = _videoFitMode.name;
+    final statusText = snapshot.status.name;
+    // 结构签名里**不含控件尺寸**：拖动窗口时控件尺寸每帧都变，含进去会刷屏。
+    // 结构（视频尺寸/fit/会话状态/生效边界）一变就立刻打；只有控件尺寸变时按秒限流
+    // （每秒一条的"视口诊断"本来就在报尺寸，这里不必重复）。
+    final structuralSignature =
+        '$sizeText|$fitText|$statusText|'
+        '${_sessionService.lastEffectiveBounds}|$_inputLayerAttached';
+    final fullSignature =
+        '$structuralSignature|${logical?.width}x${logical?.height}|'
+        '${_lastViewDevicePixelRatio.toStringAsFixed(2)}';
+    final now = DateTime.now();
+    final structuralChanged =
+        structuralSignature != _lastRenderDiagnosticsStructure;
+    if (!structuralChanged &&
+        (fullSignature == _lastRenderDiagnosticsSignature ||
+            (now.difference(_lastRenderDiagnosticsAt).inMilliseconds < 1000))) {
+      return;
+    }
+    _lastRenderDiagnosticsStructure = structuralSignature;
+    _lastRenderDiagnosticsSignature = fullSignature;
+    _lastRenderDiagnosticsAt = now;
+
+    final buffer = StringBuffer('画面诊断：视频 $sizeText');
+    buffer.write('，fit=$fitText，会话状态=$statusText');
+    buffer.write('，生效编码边界 ${_boundsText(_sessionService.lastEffectiveBounds)}');
+    if (logical != null && viewport != null) {
+      final physicalWidth = logical.width * _lastViewDevicePixelRatio;
+      final physicalHeight = logical.height * _lastViewDevicePixelRatio;
+      final physicalScale = viewport.scale * _lastViewDevicePixelRatio;
+      buffer.write(
+        '，控件 ${logical.width.toStringAsFixed(0)}x${logical.height.toStringAsFixed(0)} 逻辑'
+        '= ${physicalWidth.toStringAsFixed(0)}x${physicalHeight.toStringAsFixed(0)} 物理',
+      );
+      buffer.write(
+        '，绘制 ${viewport.displayWidth.toStringAsFixed(0)}x'
+        '${viewport.displayHeight.toStringAsFixed(0)} 逻辑'
+        '（偏移 ${viewport.offsetX.toStringAsFixed(1)},'
+        '${viewport.offsetY.toStringAsFixed(1)}）',
+      );
+      buffer.write(
+        '，**本地放大 ${physicalScale.toStringAsFixed(2)}x**'
+        '${physicalScale > 1.02 ? '（>1 就是被本地拉大，越大约糊）' : '（≤1 不会被拉糊）'}',
+      );
+    } else if (logical == null) {
+      buffer.write('，控件尺寸尚未上报');
+    } else {
+      buffer.write('，视口不可用（视频尺寸未知）');
+    }
+    buffer.write(
+      '，输入层=${_inputLayerAttached ? '接上' : '断开（点画面不会有任何反应）'}',
+    );
+    _appendLog(buffer.toString());
+  }
+
+  String? _lastRenderDiagnosticsSignature;
+  String? _lastRenderDiagnosticsStructure;
+  DateTime _lastRenderDiagnosticsAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 画面控件此刻能不能收输入（与 `_VideoStage` 里的判断同构：有视口 + 会话可用）。
+  bool get _inputLayerAttached =>
+      snapshot.status.isUsable &&
+      _lastViewLogicalSize != null &&
+      viewportFor(
+            viewWidth: _lastViewLogicalSize!.width,
+            viewHeight: _lastViewLogicalSize!.height,
+          ) !=
+          null;
 
   /// 当前视频画面在控件里的换算关系；没有画面或还没尺寸时返回 null。
   VideoViewport? viewportFor({
@@ -231,6 +445,27 @@ class PlayerViewModel extends ChangeNotifier {
     return viewport.isUsable ? viewport : null;
   }
 
+  /// 编码边界策略（清晰度取舍；见 [VideoBoundsMode]）。
+  VideoBoundsMode get boundsMode => _sessionService.boundsMode;
+
+  /// 切换"省设备算力 / 清晰优先"。
+  ///
+  /// 与 [setVideoFitMode] 的区别：这个**会真的改设备那边的编码像素数**，
+  /// 所以切换后会立刻补发一条 `CHANGE_STREAM_PARAMETERS`（服务端会重建编码器，
+  /// 画面可能短暂停顿一下）。为什么要立刻发：用户点了"清晰优先"就要马上看到变化。
+  void setBoundsMode(VideoBoundsMode mode) {
+    if (_sessionService.boundsMode == mode) {
+      return;
+    }
+    final result = _sessionService.setBoundsMode(mode);
+    if (result.isError) {
+      _logs.add('切换编码边界策略失败：${result.error!.message}');
+    }
+    _lastRenderDiagnosticsSignature = null;
+    _maybeLogRenderDiagnostics();
+    _notify();
+  }
+
   /// 画面填充方式（默认完整显示）。见 [VideoFitMode]。
   VideoFitMode get videoFitMode => _videoFitMode;
   VideoFitMode _videoFitMode = VideoFitMode.contain;
@@ -245,6 +480,9 @@ class PlayerViewModel extends ChangeNotifier {
     }
     _videoFitMode = mode;
     _inputLogger.info('画面填充方式切到：${mode.label}（${mode.name}）');
+    // 切换后把新的换算数字打出来：铺满模式下"点哪都偏/点不动"要能对着这几个数看。
+    _lastRenderDiagnosticsSignature = null;
+    _maybeLogRenderDiagnostics();
     _notify();
   }
 
@@ -471,6 +709,7 @@ class PlayerViewModel extends ChangeNotifier {
             _lastError ?? const RemoteException(message: '投流连接失败，已停止自动重连'),
           )
         : AsyncSuccess<StreamSessionSnapshot>(snapshot);
+    _maybeLogRenderDiagnostics();
     _notify();
 
     // 连接不可用时清空指针状态：设备端要么已经换了会话、要么马上就要重连，
@@ -505,6 +744,7 @@ class PlayerViewModel extends ChangeNotifier {
         return;
       }
       _videoSize = size;
+      _maybeLogRenderDiagnostics();
       _notify();
     });
     try {
@@ -523,6 +763,7 @@ class PlayerViewModel extends ChangeNotifier {
       // 注意顺序：先用解码器已经拿到的尺寸（create 回执通常已经给了占位尺寸），
       // 再退回 displayInfo 里的尺寸；真实尺寸会在后续回执里更新。
       _videoSize = _decoder.lastSize ?? initialSize;
+      _maybeLogRenderDiagnostics();
       // 只在这里订阅视频帧：之前的帧由广播流丢弃，避免喂给未就绪的解码器。
       _frameSubscription = _sessionService.videoFrames.listen(_onVideoFrame);
       _logs.add('原生解码器已启动（textureId=$_textureId）');
@@ -564,6 +805,19 @@ class PlayerViewModel extends ChangeNotifier {
     _videoSize = null;
   }
 
+  /// 往 UI 日志面板里追加一条并打印（视口/画面诊断用；业务日志走 `_onLog`）。
+  void _appendLog(String line) {
+    if (_disposed) {
+      return;
+    }
+    _logs.add(line);
+    if (_logs.length > maxLogLines) {
+      _logs.removeRange(0, _logs.length - maxLogLines);
+    }
+    _viewportLogger.info(line);
+    _notify();
+  }
+
   void _onLog(String line) {
     if (_disposed) {
       return;
@@ -584,6 +838,8 @@ class PlayerViewModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _viewportSettleTimer?.cancel();
+    _viewportSettleTimer = null;
     unawaited(_snapshotSubscription?.cancel());
     unawaited(_logSubscription?.cancel());
     unawaited(_teardownDecoder());

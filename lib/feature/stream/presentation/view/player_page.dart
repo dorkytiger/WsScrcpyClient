@@ -15,6 +15,7 @@ import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
+import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
 
 /// 投流页。
@@ -64,6 +65,8 @@ class _PlayerPageState extends State<PlayerPage> {
         authorization: widget.authorization,
       );
       _keyboardFocusNode.requestFocus();
+      // 新会话的第一条"输入层"日志必须是完整的（见 _VideoStage._lastInteractiveLogged）。
+      _VideoStage._lastInteractiveLogged = null;
     });
     _setWakelock(widget.keepScreenOn);
   }
@@ -309,6 +312,10 @@ class _VideoStage extends StatelessWidget {
   /// 视图层给前者，[PlayerViewModel] 给后者（带发出序号），两边的序号/坐标一对就定位了。
   static final AppLogger _inputLogger = AppLogger('Input');
 
+  /// 诊断用：上一次"输入层接上/未接上"的状态——只用来避免重复刷同一条日志，
+  /// 不参与任何渲染或命中判定。每次进投流页在 [PlayerPage.initState] 里清零。
+  static bool? _lastInteractiveLogged;
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -345,6 +352,25 @@ class _VideoStage extends StatelessWidget {
       viewHeight: constraints.maxHeight,
     );
     final interactive = viewport != null && snapshot.status.isUsable;
+
+    // 输入层到底挂没挂上，只在翻转时记一条：用户说"点画面没反应"时，
+    // 有这一条就能立刻分清是**事件根本没到 Listener**（这条会说"未接上"）
+    // 还是事件到了、被坐标换算/状态机丢掉了（`[Input]` 的逐条日志会说话）。
+    if (_lastInteractiveLogged != interactive) {
+      _lastInteractiveLogged = interactive;
+      _inputLogger.info(
+        interactive
+            ? '输入层已接上：视频 ${size?.width}x${size?.height}，'
+                  '控件 ${constraints.maxWidth.toStringAsFixed(0)}x'
+                  '${constraints.maxHeight.toStringAsFixed(0)}，'
+                  'fit=${fit.name}，scale=${viewport.scale.toStringAsFixed(3)}'
+            : '输入层**未接上**（点画面不会有任何反应）：原因='
+                  '${viewport == null ? '视口不可用（视频 ${size?.width}x${size?.height} / '
+                        '控件 ${constraints.maxWidth.toStringAsFixed(0)}x'
+                        '${constraints.maxHeight.toStringAsFixed(0)}）'
+                      : '会话状态=${snapshot.status.description}（${snapshot.status.name}）'}',
+      );
+    }
 
     // 渲染与 [VideoViewport] 必须是**同一套变换**（同一个 BoxFit + 居中），
     // 否则改成"铺满"之后点哪都偏 —— 所以这里直接交给 FittedBox，
@@ -762,21 +788,25 @@ class _QuickBar extends StatelessWidget {
         icon: Icons.arrow_back,
         label: '返回',
         onPressed: enabled ? onBack : null,
+        compact: axis == Axis.vertical,
       ),
       _QuickBarButton(
         icon: Icons.home_outlined,
         label: '主页',
         onPressed: enabled ? onHome : null,
+        compact: axis == Axis.vertical,
       ),
       _QuickBarButton(
         icon: Icons.apps,
         label: '最近',
         onPressed: enabled ? onRecents : null,
+        compact: axis == Axis.vertical,
       ),
       _QuickBarButton(
         icon: Icons.more_horiz,
         label: '更多',
         onPressed: enabled ? onMore : null,
+        compact: axis == Axis.vertical,
       ),
     ];
     final isVertical = axis == Axis.vertical;
@@ -789,15 +819,22 @@ class _QuickBar extends StatelessWidget {
         top: false,
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.sm,
+          // 竖排时把内边距也收紧：横屏下这一条每一点宽度都是从画面里抠出来的。
+          padding: EdgeInsets.symmetric(
+            horizontal: isVertical ? AppSpacing.xs : AppSpacing.sm,
             vertical: AppSpacing.xs,
           ),
           child: isVertical
-              ? Column(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  mainAxisSize: MainAxisSize.min,
-                  children: buttons,
+              // **不要用 spaceEvenly**：横屏时这一列会拿到整屏高度，
+              // spaceEvenly 把 4 个按钮摊到 400 多点里，看着"散"、拇指也够不着。
+              // 收成居中一小组（间距 AppSpacing.xs），既紧凑又好按。
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: AppSpacing.xs,
+                    children: buttons,
+                  ),
                 )
               : Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -810,16 +847,21 @@ class _QuickBar extends StatelessWidget {
 }
 
 /// 单个快捷栏按钮：图标在上、文案在下，点击区域够大（拇指可及）。
+///
+/// [compact] 给横屏的**竖排**快捷栏用：内边距与图标都收小（那一列越窄，画面越宽），
+/// 但最小可点区域仍然保持 44x44（低于这个值手指按不准，也过不了无障碍规范）。
 class _QuickBarButton extends StatelessWidget {
   const _QuickBarButton({
     required this.icon,
     required this.label,
     required this.onPressed,
+    this.compact = false,
   });
 
   final IconData icon;
   final String label;
   final VoidCallback? onPressed;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -830,21 +872,29 @@ class _QuickBarButton extends StatelessWidget {
     return InkWell(
       onTap: onPressed,
       borderRadius: BorderRadius.circular(AppRadius.md),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.lg,
-          vertical: AppSpacing.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(icon, size: AppIconSize.lg, color: color),
-            const SizedBox(height: AppSpacing.xxs),
-            Text(
-              label,
-              style: theme.textTheme.labelSmall?.copyWith(color: color),
-            ),
-          ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? AppSpacing.xs : AppSpacing.lg,
+            vertical: compact ? AppSpacing.xxs : AppSpacing.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Icon(
+                icon,
+                size: compact ? AppIconSize.md : AppIconSize.lg,
+                color: color,
+              ),
+              const SizedBox(height: AppSpacing.xxs),
+              Text(
+                label,
+                style: theme.textTheme.labelSmall?.copyWith(color: color),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -917,6 +967,29 @@ class _MoreActionsSheet extends StatelessWidget {
                 ),
                 title: const Text('铺满屏幕'),
                 subtitle: const Text('裁掉画面上下边缘，换掉左右的黑边；不改设备那边的编码'),
+              ),
+            ),
+            const Divider(height: 1),
+            // 清晰度：网页端之所以看着更清楚，是因为它把**浏览器视口尺寸**当编码边界发过去，
+            // 而我们原来一律封顶到设备原生（§12.7 是为了不许设备多编像素）。
+            // 这个开关把选择权还给用户：清晰优先 = 允许设备多编到原生 2 倍像素。
+            ListenableBuilder(
+              listenable: viewModel,
+              builder: (BuildContext context, _) => SwitchListTile(
+                value: viewModel.boundsMode == VideoBoundsMode.viewport,
+                onChanged: (bool clearFirst) => viewModel.setBoundsMode(
+                  clearFirst
+                      ? VideoBoundsMode.viewport
+                      : VideoBoundsMode.nativeCap,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.lg,
+                ),
+                title: const Text('清晰优先（按画面区像素编码）'),
+                subtitle: Text(
+                  '${VideoBoundsMode.viewport.description}；'
+                  '关掉 = ${VideoBoundsMode.nativeCap.description}',
+                ),
               ),
             ),
             const Divider(height: 1),

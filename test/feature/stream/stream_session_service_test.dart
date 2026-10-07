@@ -15,6 +15,7 @@ import 'package:ws_scrcpy_client/feature/stream/application/service/stream_sessi
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/stream_remote_datasource.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
+import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 
 import '../../core/stream/stream_fixtures.dart';
 
@@ -172,7 +173,7 @@ void main() {
     );
   });
 
-  test('UI 尺寸晚于初始信息头：兜底先发一条，UI 报尺寸后补一条更新', () async {
+  test('UI 尺寸晚于初始信息头：兜底那条等价时不再补发，视口真的更小时才补', () async {
     await service.start(target);
     transport.emit(loadInitialInfoFixture());
     await pumpEventQueue(); // 兜底定时器（测试里是 0ms）在这一步触发
@@ -186,14 +187,22 @@ void main() {
       reason: '等不到 UI 尺寸时用服务端给的值，但仍要收敛到原生范围内（不放大）+ 同设备比例 + 16 对齐',
     );
 
-    // UI 布局好了，报上真实视口：这时才补一条（这是正常的"尺寸变化"路径）。
+    // UI 布局好了，报上桌面窗口那样的视口：收敛后**还是原生 1280x720**，
+    // 与兜底那条完全等价 → **不该再发**（每多发一条服务端就重建一次编码器）。
     service.applyViewportBounds(width: 1898, height: 853);
+    expect(
+      framesOfType(ControlMessageType.changeStreamParameters.code),
+      hasLength(1),
+      reason: '去重比的是收敛后的生效边界：兜底那条已经等价，不必再补一条',
+    );
+
+    // 视口真的小到"收敛结果不同"（800x600 → 800x448）时才补一条。
+    service.applyViewportBounds(width: 800, height: 600);
     final settings = framesOfType(
       ControlMessageType.changeStreamParameters.code,
     );
     expect(settings, hasLength(2));
-    // 同样收敛到原生范围内 + 16 对齐（不放大，AGENTS §12.7/§12.8）。
-    expect(settingsOf(settings.last).bounds, const VideoSize(1280, 720));
+    expect(settingsOf(settings.last).bounds, const VideoSize(800, 448));
   });
 
   test('重复收到初始信息头时只下发一次视频参数（防反馈循环）', () async {
@@ -391,6 +400,113 @@ void main() {
       const VideoSize(16, 16),
       reason: '极小视口不会被对齐成 0',
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // 编码边界策略（清晰度取舍）：网页端更清楚就是因为它的 bounds 不封顶到原生
+  // ---------------------------------------------------------------------------
+
+  test('★ 清晰优先：允许编码超过设备原生（上限 2 倍），网页端就是这么干的', () {
+    const native = VideoSize(1280, 720);
+    // 1898x853 就是 §12.7 那次真机实测的 Ui 视口（同比例收框后是 1516x853）。
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(1898, 853),
+        native: native,
+        mode: VideoBoundsMode.viewport,
+      ),
+      const VideoSize(1504, 848),
+      reason: '清晰优先下不再封顶到原生，只受"原生 ×2"上限约束，再 16 对齐',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(6000, 3376),
+        native: native,
+        mode: VideoBoundsMode.viewport,
+      ),
+      const VideoSize(2560, 1440),
+      reason: '窗口再大也只到原生 2 倍：容器里的软编码器扛不住更高',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(1898, 853),
+        native: native,
+        mode: VideoBoundsMode.nativeCap,
+      ),
+      const VideoSize(1280, 720),
+      reason: '省设备算力模式保持原行为（AGENTS §12.7：绝不向设备要放大）',
+    );
+  });
+
+  test('★ 转屏不改编码边界：一条消息都不发（服务端不会重建编码器）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    // 手机竖屏：402x698 逻辑 @3 → 1206x2094 物理。
+    service.applyViewportBounds(width: 1206, height: 2094);
+    final afterPortrait = transport.sent.length;
+    expect(
+      settingsOf(
+        framesOfType(ControlMessageType.changeStreamParameters.code).last,
+      ).bounds,
+      const VideoSize(1280, 720),
+      reason: '竖屏贴原生 → 吸附成原生（免得转屏时来回改边界）',
+    );
+
+    // 转成横屏：874x402 逻辑 @3 → 2622x1206 物理。
+    service.applyViewportBounds(width: 2622, height: 1206);
+    expect(
+      transport.sent.length,
+      afterPortrait,
+      reason: '转屏前后边界都是原生 1280x720，去重应该吃掉第二条：'
+          '每多发一条服务端就重建一次编码器，重建后要等新的 IDR（10s）→ 画面停住几十秒',
+    );
+    expect(
+      service.viewportUpdateSequence,
+      0,
+      reason: '连竖屏那次都不需要补发：首发用的服务端边界收敛后本来就是原生 1280x720，'
+          '转屏前后都一样 → 编码器全程不重建',
+    );
+  });
+
+  test('★ 切换清晰优先：立刻按当前视口补发一条参数（尺寸没变也要发）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    // UI 报上来的视口就是 §12.7 那次实测的 1898x853。
+    service.applyViewportBounds(width: 1898, height: 853);
+    final framesBefore = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(
+      settingsOf(framesBefore.last).bounds,
+      const VideoSize(1280, 720),
+      reason: '默认省设备算力：封顶到设备原生',
+    );
+
+    final result = service.setBoundsMode(VideoBoundsMode.viewport);
+    expect(result.isSuccess, isTrue);
+    final framesAfter = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(
+      framesAfter,
+      hasLength(framesBefore.length + 1),
+      reason: '切换模式必须马上补发一条，否则用户点了开关看不到任何变化',
+    );
+    expect(
+      settingsOf(framesAfter.last).bounds,
+      const VideoSize(1504, 848),
+      reason: '清晰优先：按画面区像素编码（不再封顶到 1280x720）',
+    );
+
+    // 切回去也要立刻生效，而且回到原生封顶。
+    service.setBoundsMode(VideoBoundsMode.nativeCap);
+    final framesBack = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(framesBack, hasLength(framesAfter.length + 1));
+    expect(settingsOf(framesBack.last).bounds, const VideoSize(1280, 720));
   });
 
   test('已发过参数后断开再改尺寸：返回失败而不是抛异常', () async {

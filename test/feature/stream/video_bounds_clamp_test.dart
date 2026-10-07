@@ -74,12 +74,46 @@ void main() {
         native: native,
       );
       // 老算法：432x720 的竖框 → 服务端装进去只剩 432x240（上屏放大 2.96 倍 = 糊）。
-      // 新算法：1200x672，像素数多 7.7 倍。
-      expect(clamped, const VideoSize(1200, 672));
+      // 只做"同比例收框 + 不放大"是 1200x672（像素多 7.7 倍）；**再叠上"贴原生就吸原生"**（2026-10-07）
+      // 就是 1280x720 —— 顺带把"转屏要重建编码器"这件事消掉了（见下面那条测试）。
+      expect(clamped, const VideoSize(1280, 720));
       expect(
         clamped.width * clamped.height,
         greaterThan(432 * 240 * 7),
         reason: '这条就是"画面糊"的回归门禁',
+      );
+    });
+
+    test('★ 转屏（竖 1206x2094 ↔ 横 2622x1206）收敛成同一个边界：服务端不用重建编码器', () {
+      // 用户实测"手机旋转一下屏幕就点不动了/要等几十秒"：转屏会改编码边界 → 服务端重建编码器
+      // → 要等新的 IDR（iFrameInterval=10s）→ 画面停住。吸附到原生后两个方向都是原生尺寸，
+      // service 的去重会直接吃掉第二条消息（配合真机日志 `视口诊断…下发 0 条`）。
+      final portrait = StreamSessionService.clampBoundsToNative(
+        viewport: const VideoSize(1206, 2094),
+        native: native,
+      );
+      final landscape = StreamSessionService.clampBoundsToNative(
+        viewport: const VideoSize(2622, 1206),
+        native: native,
+      );
+      expect(portrait, const VideoSize(1280, 720));
+      expect(landscape, const VideoSize(1280, 720));
+      expect(portrait, landscape, reason: '转屏前后必须完全一致，否则每转一次就重建一次编码器');
+    });
+
+    test('视口明显小于原生时仍然不吸附（不许让小窗口白烧设备算力）', () {
+      final clamped = StreamSessionService.clampBoundsToNative(
+        viewport: const VideoSize(999, 601),
+        native: native,
+      );
+      expect(
+        clamped,
+        const VideoSize(992, 560),
+        reason: '992/1280=77.5% 低于吸附门槛 90%，保持不放大（AGENTS §12.7）',
+      );
+      expect(
+        StreamSessionService.snapToNativeRatio,
+        closeTo(0.9, 1e-9),
       );
     });
 
@@ -172,5 +206,27 @@ void main() {
         expect(fallback.bitrate, isNot(VideoSettings.defaultBitrate));
       },
     );
+
+    test('★ 发出去之前用网页端 MSE 播放器的首选值补齐（bundle.js 实测值）', () {
+      final fallback = StreamSessionService.fallbackVideoSettings(0);
+      final filled = StreamSessionService.withWebPlayerPreferredDefaults(fallback);
+      // 依据：bundle.js `MsePlayer.preferredVideoSettings = {bitrate: 7340032, maxFps: 60,
+      // iFrameInterval: 10, ...}`。不补的话实测平均只有 ~0.6 Mbps / ~11fps → 画面又软又块。
+      expect(filled.bitrate, StreamSessionService.webPlayerPreferredBitrate);
+      expect(filled.bitrate, 7340032);
+      expect(filled.maxFps, StreamSessionService.webPlayerPreferredMaxFps);
+      expect(filled.maxFps, 60);
+      expect(filled.iFrameInterval, StreamSessionService.webPlayerPreferredIFrameInterval);
+      expect(filled.iFrameInterval, 10);
+    });
+
+    test('★ 服务端给了的字段必须原样回显，不能被本地值覆盖（§6.2 反馈循环教训）', () {
+      final fromServer = StreamSessionService.withWebPlayerPreferredDefaults(
+        const VideoSettings(bitrate: 1234567, maxFps: 15, iFrameInterval: 3),
+      );
+      expect(fromServer.bitrate, 1234567);
+      expect(fromServer.maxFps, 15);
+      expect(fromServer.iFrameInterval, 3);
+    });
   });
 }
