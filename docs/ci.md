@@ -93,13 +93,20 @@ Error response from daemon: failed to resolve reference "data.forgejo.org/oci/ub
 ```yaml
 runner:
   labels:
-    # ① 用 Docker Hub 官方镜像（多数环境可用）
-    - "ubuntu-latest:docker://docker.io/library/ubuntu:24.04"
-    # ② 或换成这台机器拉得到的镜像源，例如国内镜像：
-    # - "ubuntu-latest:docker://docker.m.daocloud.io/library/ubuntu:24.04"
-    # ③ 或干脆不进容器、直接跑在宿主机上（宿主机要有 node，JS action 才跑得起来）：
+    # ① 用 runner 官方文档自己给的那个镜像（★ 推荐）：里面有 node，
+    #    JS action（actions/checkout、upload-artifact 全是 JS）才跑得起来。
+    - "ubuntu-latest:docker://node:20-bookworm"
+    # ② 或换成这台机器拉得到的等价镜像 / 国内镜像源，例如：
+    # - "ubuntu-latest:docker://docker.m.daocloud.io/library/node:20-bookworm"
+    # ③ 或干脆不进容器、直接跑在宿主机上（宿主机要有 node + curl/git/tar）：
     # - "ubuntu-latest:host"
 ```
+
+> **★ 别指向 `ubuntu:24.04` 这类"纯系统镜像"**：`actions/checkout`、`upload-artifact`
+> 这些 **JS action 需要容器里有 `node`**，纯 Ubuntu 镜像里没有，会以
+> `node: command not found` 失败（换一个坑继续踩）。
+> 官方默认那个 `data.forgejo.org/oci/ubuntu:24.04` 之所以能用，是因为它是 **Forgejo 自己
+> 为 act 构建的镜像**（自带 node）；它拉不到时，`node:20-bookworm` 是最省事的替代。
 
 **先在 runner 机器上手动验一次，别等 CI 报错**：
 
@@ -108,11 +115,10 @@ docker pull docker.io/library/ubuntu:24.04     # 拉不动 = 网络到那个 reg
 grep -A 6 labels <forgejo-runner 的 config.yml> # 看现在映射的是哪个镜像
 ```
 
-> **`ubuntu:24.04` 里没有 Flutter 不影响**：工作流的 `subosito/flutter-action` 会自己下 SDK，
+> **镜像里没有 Flutter 不影响**：工作流的 `subosito/flutter-action` 会自己下 SDK，
 > Android 那步的 JDK 也由 `actions/setup-java` 装。
-> 反过来，**镜像里必须有 `curl` / `git` / `tar` / `unzip`**（官方 ubuntu 镜像都自带），
-> 所以别用 `alpine` 这类极简镜像。
-> **web 那个 job 用 `zip`**，官方 ubuntu 镜像里也有（`zip -qr`）。
+> 但镜像里必须有 **`node`（JS action）+ `curl` / `git` / `tar` / `xz`（下 Flutter SDK）**，
+> web 那个 job 还要 **`zip`** —— 这就是"别用 alpine、也别用纯 ubuntu"的原因。
 
 > 另一种思路：如果 `docker` 这个标签映射的镜像是好的，把三个 Linux job 临时改成
 > `runs-on: docker` 即可先跑起来；或者给 runner 加一个 `host` 标签后用 `runs-on: host`。
