@@ -10,12 +10,14 @@ import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
+import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
 import 'package:ws_scrcpy_client/core/util/message_of.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
+import 'package:ws_scrcpy_client/feature/stream/presentation/view/web_video_surface.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
 
 /// 投流页。
@@ -340,7 +342,7 @@ class _VideoStage extends StatelessWidget {
         snapshot: snapshot,
         decoderError: viewModel.decoderError,
         isDecoderCreating: viewModel.isDecoderCreating,
-        isNativeDecodingSupported: viewModel.isNativeDecodingSupported,
+        isVideoDecodingSupported: viewModel.isVideoDecodingSupported,
         onRetryDecoder: viewModel.retryDecoder,
       );
     }
@@ -375,21 +377,30 @@ class _VideoStage extends StatelessWidget {
     // 渲染与 [VideoViewport] 必须是**同一套变换**（同一个 BoxFit + 居中），
     // 否则改成"铺满"之后点哪都偏 —— 所以这里直接交给 FittedBox，
     // 不再手写 AspectRatio：两边的比例来源都是 videoSize。
-    final video = ColoredBox(
-      color: Colors.black,
-      child: ClipRect(
-        child: SizedBox.expand(
-          child: FittedBox(
-            fit: fit == VideoFitMode.cover ? BoxFit.cover : BoxFit.contain,
-            child: SizedBox(
-              width: (size?.width ?? 1280).toDouble(),
-              height: (size?.height ?? 720).toDouble(),
-              child: Texture(textureId: textureId),
+    //
+    // web 例外：那边画面是 **DOM canvas 平台视图**，不参与 Flutter 绘制，FittedBox
+    // 管不到它 —— 改成把 [VideoViewport] 原样交给解码器，由它用**同一套数字**写 CSS
+    // （见 `WebCodecsVideoDecoder.applyDisplayGeometry`；两边一旦分家就会"点哪都偏"）。
+    final video = isWebPlatform
+        ? buildWebVideoSurface(
+            viewport: viewport,
+            onGeometry: viewModel.applyWebDisplayGeometry,
+          )
+        : ColoredBox(
+            color: Colors.black,
+            child: ClipRect(
+              child: SizedBox.expand(
+                child: FittedBox(
+                  fit: fit == VideoFitMode.cover ? BoxFit.cover : BoxFit.contain,
+                  child: SizedBox(
+                    width: (size?.width ?? 1280).toDouble(),
+                    height: (size?.height ?? 720).toDouble(),
+                    child: Texture(textureId: textureId),
+                  ),
+                ),
+              ),
             ),
-          ),
-        ),
-      ),
-    );
+          );
     if (!interactive) {
       return video;
     }
@@ -497,14 +508,14 @@ class _VideoPlaceholder extends StatelessWidget {
     required this.snapshot,
     required this.decoderError,
     required this.isDecoderCreating,
-    required this.isNativeDecodingSupported,
+    required this.isVideoDecodingSupported,
     required this.onRetryDecoder,
   });
 
   final StreamSessionSnapshot snapshot;
   final GlobalException? decoderError;
   final bool isDecoderCreating;
-  final bool isNativeDecodingSupported;
+  final bool isVideoDecodingSupported;
   final Future<void> Function() onRetryDecoder;
 
   @override
@@ -563,7 +574,8 @@ class _VideoPlaceholder extends StatelessWidget {
                   if (decoderError != null) ...<Widget>[
                     const SizedBox(height: AppSpacing.lg),
                     Text(
-                      '原生解码失败：${decoderError!.message}',
+                      '${isWebPlatform ? 'WebCodecs 解码失败' : '原生解码失败'}：'
+                      '${decoderError!.message}',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.error,
@@ -584,13 +596,13 @@ class _VideoPlaceholder extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     Text(
-                      '正在启动原生解码器…',
+                      '正在启动${isWebPlatform ? ' WebCodecs' : '原生'}解码器…',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onInverseSurface,
                       ),
                     ),
                   ] else if (snapshot.hasVideo &&
-                      isNativeDecodingSupported &&
+                      isVideoDecodingSupported &&
                       !snapshot.status.isUsable) ...<Widget>[
                     const SizedBox(height: AppSpacing.lg),
                     Text(
@@ -614,12 +626,12 @@ class _VideoPlaceholder extends StatelessWidget {
                     ),
                   ],
                   if (snapshot.hasVideo &&
-                      !isNativeDecodingSupported) ...<Widget>[
+                      !isVideoDecodingSupported) ...<Widget>[
                     const SizedBox(height: AppSpacing.lg),
                     Text(
                       '收到的是裸 H.264（Annex-B，一条消息一帧）。\n'
-                      '原生解码目前已在 Android / Windows / iOS / macOS 上实现；其它平台可先用设备卡片上的'
-                      '"网页"入口观看。',
+                      '解码目前已在 Android / Windows / iOS / macOS（系统硬解）'
+                      '与 web（WebCodecs）上实现；其它平台可先用设备卡片上的"网页"入口观看。',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onInverseSurface,

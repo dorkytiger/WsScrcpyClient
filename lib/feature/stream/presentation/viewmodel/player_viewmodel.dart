@@ -7,6 +7,7 @@ import 'package:ws_scrcpy_client/core/control/key_code_control_message.dart';
 import 'package:ws_scrcpy_client/core/control/touch_control_message.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
+import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/state/async_state.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
@@ -16,17 +17,17 @@ import 'package:ws_scrcpy_client/feature/stream/application/input/touch_pointer_
 import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
-import 'package:ws_scrcpy_client/feature/stream/data/remote/native_video_decoder.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/remote/video_decoder_factory.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 
-/// 投流页视图模型：会话三态 + 原生解码（M2 路线 A：Android / Windows）。
+/// 投流页视图模型：会话三态 + 视频解码编排（原生硬解 / web WebCodecs）。
 ///
 /// 职责边界：会话生命周期与解码器编排在这里触发，具体协议/解码实现都在 service 与
-/// [NativeVideoDecoder] 里；这里只维护"给 UI 看的状态"。
+/// [VideoDecoder] 的实现里；这里只维护"给 UI 看的状态"。
 class PlayerViewModel extends ChangeNotifier {
-  PlayerViewModel(this._sessionService, {NativeVideoDecoder? decoder})
-    : _decoder = decoder ?? NativeVideoDecoder();
+  PlayerViewModel(this._sessionService, {VideoDecoder? decoder})
+    : _decoder = decoder ?? createVideoDecoder();
 
   /// 日志面板最多保留的条数（避免长时间运行内存增长）。
   static const int maxLogLines = 200;
@@ -38,7 +39,7 @@ class PlayerViewModel extends ChangeNotifier {
   static const int kInputDuplicateWindowMs = 30;
 
   final StreamSessionService _sessionService;
-  final NativeVideoDecoder _decoder;
+  final VideoDecoder _decoder;
 
   /// 输入链路诊断（用户报告的"点一次触发两次 / 总差上一次"靠这几条定性）。
   final AppLogger _inputLogger = AppLogger('Input');
@@ -103,12 +104,13 @@ class PlayerViewModel extends ChangeNotifier {
   /// - Windows：Media Foundation H.264 解码器 MFT；
   /// - iOS / macOS：VideoToolbox（`VTDecompressionSession` → `CVPixelBuffer` → `FlutterTexture`，
   ///   两端共用同一份 `darwin/ScrcpyVideo*.swift`）。
-  bool get isNativeDecodingSupported =>
-      !kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.windows ||
-          defaultTargetPlatform == TargetPlatform.iOS ||
-          defaultTargetPlatform == TargetPlatform.macOS);
+  bool get isVideoDecodingSupported =>
+      isWebPlatform ||
+      (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.windows ||
+              defaultTargetPlatform == TargetPlatform.iOS ||
+              defaultTargetPlatform == TargetPlatform.macOS));
 
   /// 是否正在等待解码器创建完成。
   bool get isDecoderCreating => _decoderCreating;
@@ -466,6 +468,13 @@ class PlayerViewModel extends ChangeNotifier {
     _notify();
   }
 
+  /// web 专用：把画面几何交给解码器（原生是空实现，见 [VideoDecoder.applyDisplayGeometry]）。
+  ///
+  /// 只有 web 的 canvas 平台视图需要——那边不能靠 `FittedBox` 缩放 DOM 元素，
+  /// 所以 contain/cover 得由我们用同一套 [VideoViewport] 数字写进 CSS。
+  void applyWebDisplayGeometry(VideoViewport? viewport) =>
+      _decoder.applyDisplayGeometry(viewport);
+
   /// 画面填充方式（默认完整显示）。见 [VideoFitMode]。
   VideoFitMode get videoFitMode => _videoFitMode;
   VideoFitMode _videoFitMode = VideoFitMode.contain;
@@ -726,7 +735,7 @@ class PlayerViewModel extends ChangeNotifier {
     // 拿到 displayInfo（含真实分辨率）后就可以起解码器了。
     final display = snapshot.display;
     if (display != null &&
-        isNativeDecodingSupported &&
+        isVideoDecodingSupported &&
         _textureId == null &&
         !_decoderCreating &&
         !_decoderUnavailable) {

@@ -508,10 +508,9 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 
 - **中文字在浏览器里显示成方块**：Flutter web 的 CJK 回退字体要从 `fonts.gstatic.com` 按需下载
   （沙箱取不到就变豆腐块）。正常有网的浏览器没问题；**内网/离线部署要自带 CJK 字体**。
-- **阶段二（解码上屏）还没开始**：走 WebCodecs。好消息是服务端 bundle 里的
-  `WebCodecsPlayer` 已经证明**不用做 Annex-B→AVCC**（不传 `VideoDecoderConfig.description`
-  就是 Annex-B 输入），坏消息是它对网页端用的是 **480×480 / 24fps / 512kbps**
-  —— 浏览器侧解码是弱环，**别期待和原生同画质**。
+- ~~**阶段二（解码上屏）还没开始**~~ → **2026-10-07 已实现，见 §17**（WebCodecs + canvas
+  平台视图）。服务端 bundle 里的 `WebCodecsPlayer` 之前就证明了**不用做 Annex-B→AVCC**
+  （不传 `VideoDecoderConfig.description` 就是 Annex-B 输入），我们照这条走。
 - **验证手段受限**：我这边没有辅助访问权限，点不了浏览器也点不了模拟器，
   只能"构建 + 静态服务器 + `screencapture` 看首屏"；**交互验证要靠用户**。
 
@@ -1673,3 +1672,103 @@ getMaxSize = function () {
   有 down 但 `→ 丢弃（黑边…）` → 坐标换算与渲染不一致；
 - 画面糊 → 看 `本地放大 x.xx 倍`：>1 就是被本地拉大，配合 `生效编码边界` 判断
   是"设备只给这么多像素"还是"我们要得太少"（后者就是 §16.3 的开关）。
+
+---
+
+## 17. web 端阶段二：WebCodecs 解码 + canvas 上屏（2026-10-07）
+
+### 17.1 现状：阶段一时"连上也没有画面"
+
+阶段一（§9.3）能跑通设备列表 / 投流连接 / 鉴权，但 `isVideoDecodingSupported` 在 web 上
+是 false，页面上只有一句"原生解码已在 … 实现；其它平台可用设备卡片的网页入口观看"。
+这一节补的就是那一层。
+
+### 17.2 数据流（与原生三端只差"谁在解码"）
+
+```
+WS 视频帧（裸 Annex-B，一条消息一帧）
+   │  StreamSessionService.videoFrames
+   ▼
+PlayerViewModel（编排完全没改：何时建解码器 / 喂帧 / 尺寸变化 / 失败重试）
+   │  VideoDecoder 接口（本次新抽出来的平台边界）
+   ▼
+WebCodecsVideoDecoder（lib/feature/stream/data/remote/webcodecs_video_decoder.dart）
+   ├─ H264AnnexB（lib/core/stream/h264_annex_b.dart，纯 Dart、有夹具单测）
+   │    ├─ 有没有 IDR（type 5）→ EncodedVideoChunk 的 key / delta
+   │    └─ SPS 头三个字节 → codec 串 avc1.PPCCLL
+   ├─ 浏览器 VideoDecoder（configure(codec, optimizeForLatency:true) / decode(chunk)）
+   └─ 输出 VideoFrame → 画进 <canvas>（平台视图），画完 frame.close()
+```
+
+**三个关键决定（都写进代码注释了）**：
+
+1. **不传 `description`** → 浏览器按 Annex-B（起始码）解释，省掉 Annex-B→AVCC 重封装
+   （服务端自己的 `WebCodecsPlayer` 就是这么干的）。
+2. **`optimizeForLatency: true`** —— 这是 Apple 端 `kVTDecompressionPropertyKey_RealTime`
+   在 web 上的对应物（§1.2 那张表的第三个平台）。
+3. **画面是 DOM canvas，不参与 Flutter 绘制** → `FittedBox` 那套 contain/cover 管不到它。
+   所以 `VideoDecoder` 接口上留了一个默认空实现 `applyDisplayGeometry(viewport)`，
+   web 实现拿**与触摸换算同一份** `VideoViewport` 去写 canvas 的 CSS（left/top/width/height）。
+   **这是"渲染与换算必须同源"这条纪律在 web 上的落地方式**——两边一旦分家就又是"点哪都偏"。
+   容器的 `overflow:hidden` 负责把 cover 多出来的部分裁掉（对应原生的 `ClipRect`）。
+
+**两个容易踩的 web 特有的坑（代码里已处理，别改坏）**：
+
+- **DOM 必须 `pointer-events: none`**：否则 canvas 会把指针事件截走，
+  Flutter 的 `Listener` 收不到，整条输入链路（以及我们那套坐标换算）就白做了。
+- **平台视图只注册一次、DOM 复用**：`platformViewRegistry.registerViewFactory` 注册第二次会抛；
+  而"关掉投流再开一条"（`release()` → `create()`）时视图层还得拿到**同一个** DOM 元素。
+  所以 DOM 是 static 的，只有 `VideoDecoder` 对象是每实例的。`release()` 只关解码器 + 清画布。
+
+**WebCodecs 的错误是异步回调**，没有地方直接返回给调用方：实现里先记进 `_pendingError`，
+由**下一次 `pushFrame`** 带回给 viewmodel → UI 显示可读错误 + 重试入口
+（帧率 10~60fps，所以最多晚一帧）。
+
+### 17.3 本次改动的文件
+
+| 文件 | 作用 |
+|---|---|
+| `lib/core/stream/h264_annex_b.dart` | 纯 Dart：切 NAL / 判 IDR / 取 SPS / 造 codec 串 |
+| `lib/feature/stream/data/remote/video_decoder.dart` | 解码器平台边界（抽象类 + `applyDisplayGeometry` 默认空实现） |
+| `lib/feature/stream/data/remote/video_decoder_factory{,_io,_web}.dart` | 条件导出分派（原生 / web），套路与 `web_socket_transport_connect.dart` 一致 |
+| `lib/feature/stream/data/remote/webcodecs_video_decoder.dart` | WebCodecs 实现 + canvas 平台视图 + 几何 |
+| `lib/feature/stream/presentation/view/web_video_surface{,_stub,_web}.dart` | 视图层的平台分派：web 出 `HtmlElementView`，原生是空实现 |
+| `pubspec.yaml` | 新增直接依赖 `web: ^1.1.1`（WebCodecs 类型化绑定） |
+| `tools/build_web.sh` | 顺手修掉末尾 `$BASE_HREF（` 被当成变量名导致的 `unbound variable` |
+
+### 17.4 验证状态（★ 分清"验过的"和"没验的"）
+
+**已验**：
+- `dart analyze lib test tools` 干净（web 那份互操作代码也在静态检查范围内）；
+- **`tools/build_web.sh` 通过**（dart2js 真编译 + 链接，18.8s）——这是 web 互操作 API 的
+  主要门禁；产物里能 grep 到 `ws_scrcpy/web-video`（3 处）与 `optimizeForLatency`，
+  说明这段代码**没被 tree-shake 掉**；
+- `H264AnnexB` 用**真实抓包夹具**单测（`test/core/stream/h264_annex_b_test.dart`）：
+  首帧 = SPS(7)+PPS(8)、第二条 = IDR(5)、`avcCodecString` = **`avc1.42c029`**（Baseline 4.1，
+  就是这台 redroid 的软编码器给的）；
+- VM 全量测试 **263 通过 / 1 skip**（原生那批 mock `ws_scrcpy/video` 的测试一行没改，
+  因为 VM 里 `dart.library.js_interop` 是 false → 条件导出走原生那份）。
+
+**没验（必须靠浏览器）**：浏览器**真的能解**这条流、画面真的上屏、触摸在平台视图上还有效。
+我这边没有浏览器自动化权限（`screencapture`/AppleScript 都被拒，见 §9.2 末尾），
+所以这三条只能由人在浏览器里复验。本地跑法：
+
+```bash
+tools/build_web.sh                 # 或 tools/build_web.sh /app/
+cd build/web && python3 -m http.server 8765
+# 浏览器打开 http://127.0.0.1:8765/ —— 跨源访问第一次会弹一次 Basic Auth（§9.3 已论证免不了）
+```
+
+**如果控制台报 codec / 描述符类错误**，备用方案是"构造 `avcC`（把 SPS+PPS 塞进
+`VideoDecoderConfig.description`）+ 把每条帧重写成 4 字节长度前缀的 AVCC"——
+`H264AnnexB` 已经把 NAL 边界切好了，改起来只是多一层封装，别推翻整条链路。
+
+### 17.5 还没做的（下次接着做）
+
+- **不跟随设备分辨率变化重建解码器**：web 这边 `configure` 一旦定下 codec 就不重配；
+  设备旋转导致 SPS 变化（例如 1200x672 → 672x1200）时，Chrome 多数情况下能靠帧内
+  参数集自适应，但**没有验证过**。要稳妥就按"参数集变了 → `reset()` + 重新 `configure`"。
+- **中文字体方块**（§9.3 的老问题）与**同源部署**仍然没变。
+- **web 上的清晰度/码率**：本次那些"清晰优先 / 网页端码率"的改动是共享 Dart 层，
+  web 自动受益；但 web 的 `applyViewportSize` 走的是浏览器 CSS 尺寸，
+  物理像素要靠浏览器 DPR —— 在 Retina 上 `devicePixelRatio=2` 会照常乘上去。

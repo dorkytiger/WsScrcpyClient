@@ -245,10 +245,11 @@ void main() {
     expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
   });
 
-  testWidgets('非原生平台（Linux）：给出可读的降级说明，不尝试原生解码', (WidgetTester tester) async {
+  testWidgets('非原生平台（Linux）：给出可读的降级说明，不尝试解码', (WidgetTester tester) async {
     // 注意：必须在测试体内还原，addTearDown 太晚——框架会在测试结束前断言
     // debugDefaultTargetPlatformOverride 已被清空。
-    // 这里刻意用 Linux：Android / Windows / iOS / macOS 都已经有原生解码实现（M2 路线 A）。
+    // 这里刻意用 Linux：Android / Windows / iOS / macOS 走系统硬解、web 走 WebCodecs，
+    // 只剩 Linux 还没有实现（见 §1 的"待做"）。
     debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     try {
       final transport = _FakeTransport();
@@ -258,10 +259,10 @@ void main() {
         withVideoFrame: true,
       );
 
-      expect(viewModel.isNativeDecodingSupported, isFalse);
+      expect(viewModel.isVideoDecodingSupported, isFalse);
       expect(viewModel.decoderError, isNull);
       expect(
-        find.textContaining('已在 Android / Windows / iOS / macOS 上实现'),
+        find.textContaining('Android / Windows / iOS / macOS（系统硬解）'),
         findsOneWidget,
       );
       expect(find.text('重试解码'), findsNothing);
@@ -303,7 +304,7 @@ void main() {
           withVideoFrame: true,
         );
 
-        expect(viewModel.isNativeDecodingSupported, isTrue);
+        expect(viewModel.isVideoDecodingSupported, isTrue);
         expect(viewModel.textureId, 21);
         expect(find.byType(Texture), findsOneWidget);
         // 帧要喂给 VideoToolbox 解码器。
@@ -341,7 +342,7 @@ void main() {
         withVideoFrame: true,
       );
 
-      expect(viewModel.isNativeDecodingSupported, isTrue);
+      expect(viewModel.isVideoDecodingSupported, isTrue);
       expect(viewModel.textureId, 11);
       expect(find.byType(Texture), findsOneWidget);
       // 帧同样要喂给原生解码器（Windows 走 Media Foundation）。
@@ -363,7 +364,7 @@ void main() {
       final transport = _FakeTransport();
       final viewModel = await pumpPlayer(tester, transport);
 
-      expect(viewModel.isNativeDecodingSupported, isTrue);
+      expect(viewModel.isVideoDecodingSupported, isTrue);
       expect(viewModel.decoderError, isNotNull);
       expect(find.textContaining('原生解码失败'), findsOneWidget);
       expect(find.textContaining('测试用：解码器创建失败'), findsOneWidget);

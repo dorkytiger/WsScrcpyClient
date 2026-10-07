@@ -39,6 +39,6 @@ flutter build web \
   --base-href "$BASE_HREF"
 
 echo
-echo "✓ web 产物：$ROOT/build/web（base-href=$BASE_HREF）"
+echo "✓ web 产物：$ROOT/build/web（base-href=${BASE_HREF}）"
 echo "  挂到服务端同一个源站下（推荐）：把 build/web 的内容放到例如 /app/ 目录。"
 echo "  本地验证：cd build/web && python3 -m http.server 8765"
