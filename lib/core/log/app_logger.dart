@@ -1,5 +1,7 @@
 import 'dart:developer' as developer;
 
+import 'package:ws_scrcpy_client/core/log/app_log_file.dart';
+
 /// 日志级别。
 enum AppLogLevel {
   debug('调试'),
@@ -59,6 +61,12 @@ class AppLogger {
       stackTrace: stackTrace,
     );
     onRecord?.call(line);
+    // 同时落盘（web 上是空操作；没启动/写不进去时也是空操作）。
+    //
+    // 为什么必须有：2026-10-08 判"低延迟开关到底改了没改"时，Dart 侧那两行
+    // （`服务端初始头给的 VideoSettings` / `首发视频参数`）只在应用内面板里看得到，
+    // 于是只能靠"感觉"下结论 —— 那是排查里最不该出现的东西（§16.5）。
+    AppLogFile.write(line);
   }
 
   /// `HH:mm:ss.SSS`（本地时间）。
