@@ -419,6 +419,47 @@ https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/ecl
 2. **Flutter 版本升级**：改工作流顶层 `FLUTTER_VERSION` 后，宿主机上删掉 `$DEV_DIR/flutter`
    再跑一次 `prepare_ci_host.sh`（或直接在宿主机上 `git -C $DEV_DIR/flutter checkout <tag>`）。
 
+## 2.5 ★★ 结论：这套 runner 上"挂载宿主机目录"走不通 → 改成**烤镜像**
+
+**实测结论（2026-10-07）**：runner **v13.2.0 忽略 `container.options` 里的 `--volume`**。
+逐项排除过以后，卷依然进不了 job 容器：
+
+| 检查项 | 结果 |
+|---|---|
+| dind 里有 `/host-dev`（含 flutter/android-sdk/…） | ✅ |
+| runner 连的是哪个 daemon | ✅ dind（`DOCKER_HOST=tcp://docker-in-docker:2375`） |
+| `container.options` / `valid_volumes` 写法 | ✅ 正确（两个 `--volume` 都试过） |
+| `container:` 段重复？ | ✅ 只有 1 段（`grep -c '^container:'` = 1） |
+| runner 读的配置文件 | ✅ `/data/runner-config.yml`（`pwd` = `/data`），内容里有 options |
+| 改配置后重启、并且**运行发生在重启之后** | ✅ 仍然没有卷 |
+| job 容器里 `/opt` | ❌ 只有 `yarn-v1.22.22`；`/opt/dev`、`/opt/dev2` 连空目录都没建 |
+
+上游同症状：**forgejo/runner#425**「config container options are ignored (v6.0.0 regression)」
+（报告者说 `valid_volumes: ['**']`、`--mount`、`--volume` 都不行；修复进了 6.0.1，
+但在我们这套 **dind + label** 的用法下依然复现）。
+
+**所以改用镜像**——这是这台机器上唯一被证明可用的机制（job 镜像本来就是这么跑的）：
+
+```bash
+# 一次性：把 Flutter + Android SDK + JDK 烤进镜像（在 dind 里构建，镜像落在 dind 的持久卷上）
+mkdir -p ~/ci-image && cd ~/ci-image
+curl -fsSL -u <用户名> '<server>/…/raw/branch/3-ci-android-web/tools/ci/Dockerfile' -o Dockerfile
+curl -fsSL -u <用户名> '<server>/…/raw/branch/3-ci-android-web/tools/ci/build_ci_image.sh' -o build.sh
+bash build.sh
+
+# 然后让 runner 用这个镜像（改 compose 里 runner 的 --label，再重建容器）
+#   --label docker:docker://ws-scrcpy-ci:latest
+cd ~/forgejo-runner && sudo docker compose up -d
+```
+
+- 镜像里 Flutter/SDK/JDK 都放在 **`/opt/dev/...`**，正好是工作流探测的路径
+  （`/opt/dev/flutter`、`/opt/dev/android-sdk/platforms/android-36`、`/opt/dev/jdk`），
+  **所以工作流一行都不用改**：探测到就直接用，探测不到才回退下载（别的 runner 照样能跑）；
+- 镜像建在 **dind 里**（`docker exec -i <dind> docker build`），因为 job 容器由 dind 创建，
+  且 dind 的 `/var/lib/docker` 是持久卷 → 建一次就留住；
+- `tools/ci/Dockerfile` 里刻意避开了这台机器连不上的两处：`dl.google.com`（SDK 走腾讯镜像、
+  且不装 cmdline-tools）与 `jq`（不用第三方 action）。
+
 ## 3. 工作流做了什么
 
 | job | runner | 作用 | 产物 |
