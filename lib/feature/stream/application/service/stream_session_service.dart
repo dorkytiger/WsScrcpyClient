@@ -260,14 +260,14 @@ class StreamSessionService {
       '${_lastEffectiveBounds == null ? '' : '，上一次生效 ${_lastEffectiveBounds!.width}x'
           '${_lastEffectiveBounds!.height}'}',
     );
-    // ★ 发出去的一定是**归一化后的边界**（与设备同比例 + 档位上限 + 16 宏块对齐）。
+    // ★ 交给 `_sendVideoSettings` 的仍然是**原始视口**，不要传上面那个 `effective`。
     //
-    // 2026-10-08 排查"Android 第一次进投流页全黑"时发现这条路径有歧义：
-    // 去重比的是 `effective`，但 `_sendVideoSettings` 收的是**原始视口** `bounds`
-    // （竖屏手机上是 1264x2256 这种"比显示高 3 倍、而且是竖屏比例"的值）。
-    // 虽然 `_sendVideoSettings` 内部还会再收敛一次，但"发出去到底是什么"这条链上
-    // 隔着两次转换，日志里也看不出真实值——现在改成**传归一化值**，并在下面打出实际线值。
-    final sent = _sendVideoSettings(display, bounds: effective);
+    // 为什么（2026-10-08 被测试打回来的一次教训）：`_sendVideoSettings` 内部**还会再收敛一次**
+    // （同比例收框 + 档位上限 + 16 宏块对齐），而这条链**不是幂等**的 ——
+    // 例：1898x853 收成 1516x853 → 向下对齐 1504x848；把这个结果再收一次会变成
+    // 1504x846 → 向下对齐 **1504x832**（白白少一个宏块）。
+    // 所以"发出去到底是什么"靠下面那行**线值日志**自证，而不是靠把值改来改去。
+    final sent = _sendVideoSettings(display, bounds: bounds);
     return sent.isError ? Result.failure(sent.error!) : Result.success(true);
   }
 

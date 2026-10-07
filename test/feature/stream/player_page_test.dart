@@ -904,6 +904,9 @@ void main() {
     expect(viewModel.fillScreen, isFalse);
     await tester.tap(find.byTooltip('填满屏幕（隐藏上下边栏，左滑退出）'));
     await tester.pump();
+    // ⚠️ 进/出填满都会改变画面控件尺寸 → 触发 350ms 视口防抖；不 pump 完就报
+    //    "A Timer is still pending"（§9.4 记过这个坑）。
+    await tester.pump(const Duration(milliseconds: 400));
     expect(viewModel.fillScreen, isTrue);
     expect(
       viewModel.videoFitMode,
@@ -912,6 +915,7 @@ void main() {
     );
     viewModel.setFillScreen(false);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(viewModel.fillScreen, isFalse);
     expect(viewModel.videoFitMode, VideoFitMode.contain, reason: '退出后还原原来的显示方式');
   });
