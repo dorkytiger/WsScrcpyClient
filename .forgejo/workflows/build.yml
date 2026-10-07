@@ -77,7 +77,11 @@ jobs:
         with:
           flutter-version: '3.47.1'
           channel: stable
-          cache: true
+          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
+          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
+          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
+          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
+          cache: false
 
       - name: 基础工具（镜像里未必带 zip/unzip）
         run: |
@@ -127,7 +131,11 @@ jobs:
         with:
           flutter-version: '3.47.1'
           channel: stable
-          cache: true
+          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
+          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
+          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
+          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
+          cache: false
 
       - name: 基础工具（镜像里未必带 zip/unzip）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它有 zip/unzip：
@@ -213,7 +221,11 @@ jobs:
         with:
           flutter-version: '3.47.1'
           channel: stable
-          cache: true
+          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
+          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
+          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
+          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
+          cache: false
 
       - name: 依赖
         run: flutter pub get

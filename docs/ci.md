@@ -235,6 +235,8 @@ tools\build_release.cmd -SkipTests              # 跳过 analyze/test，赶紧�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | runner 的 `--label` 把 `ubuntu-latest` 映射到了**不存在的仓库** `oci/ubuntu`（那个 registry 只有 node/python/golang/alpine/debian） | 把那一行换成 `oci/node:20-bookworm` 后 `docker compose up -d`（见 §2.1）；或把工作流改成 `runs-on: docker` |
+| `verify`/`android`/`web` 报 `Cache Service Url not found`（或 cache 相关错误） | runner 没开缓存服务，而 `subosito/flutter-action` 的 `cache: true` 会调用 `@actions/cache` | 工作流里已设 `cache: false`（跑通优先）；想提速就在 compose 的 runner 配置里开 `cache.enabled: true` 再打开 |
+| `android` job 卡在装 SDK 或报下载失败 | `android-actions/setup-android` 要从 `dl.google.com` 取 cmdline-tools，`setup-java` 要访问 Adoptium | 在 runner 那台机器上 `curl -I https://dl.google.com` / `https://api.adoptium.net` 验通；不通就配代理或换自带 SDK 的镜像 |
 | `windows` job 一直"等待中" | 没有标签为 `windows` 的 runner（现有 `lingke` 是 Linux/Docker） | 注册 Windows runner（§2.2），或先关掉它（别设 `WINDOWS_RUNNER` 变量），Windows 包用 `tools\build_release.cmd -Platform windows` |
 | 下载 action 失败 / `uses:` 解析不了 | runner 的 `DEFAULT_ACTIONS_URL` 指不到 GitHub 或代理不通 | 在 runner 的 `config.yml` 里设 `[actions] DEFAULT_ACTIONS_URL = https://github.com`（或把 action 从内网镜像取） |
 | `[nuget_shim] ERROR: WebView2 / WIL packages are missing` | 干净 checkout 没跑取包那步 | 工作流已含 `prepare_windows_deps.ps1 -Online`；若仍报错，看它上面一条下载是否被网络拦了 |
