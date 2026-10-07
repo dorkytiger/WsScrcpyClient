@@ -21,12 +21,42 @@ IMAGE="${IMAGE:-ws-scrcpy-ci:latest}"
 sudo docker inspect "$DIND" >/dev/null 2>&1 || {
   echo "找不到 dind 容器 '$DIND'（用 docker ps 看看真实名字，或设 DIND=...）"; exit 1; }
 
+# dind 里怎么连到自己的 docker daemon：
+#   · 有些 dind 只监听 TCP（我们的 runner 就是 DOCKER_HOST=tcp://docker-in-docker:2375），
+#     这时容器内 **没有** /var/run/docker.sock，`docker` 默认会报
+#     "failed to connect to the docker API at unix:///var/run/docker.sock"；
+#   · 所以先探测：有 socket 就用 socket，否则用容器内的 127.0.0.1:2375。
+DIND_HOST=""
+if sudo docker exec "$DIND" sh -c '[ -S /var/run/docker.sock ]' 2>/dev/null; then
+  echo "dind 里有 /var/run/docker.sock，用它"
+else
+  DIND_HOST="tcp://127.0.0.1:2375"
+  echo "dind 里没有 unix socket → 用 $DIND_HOST（runner 也是走 TCP 连它的）"
+  sudo docker exec "$DIND" sh -c 'command -v docker >/dev/null && echo "dind 内有 docker CLI ✓" || echo "警告：dind 内没有 docker CLI"'
+fi
+dind_docker() { if [ -n "$DIND_HOST" ]; then sudo docker exec -e DOCKER_HOST="$DIND_HOST" "$@"; else sudo docker exec "$@"; fi; }
+
+echo
 echo "== 在 $DIND 里构建 $IMAGE（不用构建上下文，全部内容靠 Dockerfile 里的 RUN 下载）=="
-sudo docker exec -i "$DIND" docker build --progress=plain -t "$IMAGE" - < "$DOCKERFILE"
+if [ -n "$DIND_HOST" ]; then
+  sudo docker exec -i -e DOCKER_HOST="$DIND_HOST" "$DIND" docker build --progress=plain -t "$IMAGE" - < "$DOCKERFILE"
+else
+  sudo docker exec -i "$DIND" docker build --progress=plain -t "$IMAGE" - < "$DOCKERFILE"
+fi
 
 echo
 echo "== 建好的镜像 =="
-sudo docker exec "$DIND" docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep -F 'ws-scrcpy-ci' || true
+dind_docker "$DIND" docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep -F 'ws-scrcpy-ci' || true
+
+echo
+echo "== 自检：拿这个镜像跑一下，确认 Flutter / JDK / Android SDK 都在（免得白跑一次 CI）=="
+dind_docker "$DIND" docker run --rm "$IMAGE" sh -c '
+  set -e
+  echo "--- flutter ---"; flutter --version
+  echo "--- java ---";    java -version
+  echo "--- sdk ---";     ls /opt/dev/android-sdk/platforms /opt/dev/android-sdk/build-tools
+  echo "--- 关键路径 ---"; ls -d /opt/dev/flutter /opt/dev/jdk /opt/dev/android-sdk
+'
 
 cat <<TIP
 
