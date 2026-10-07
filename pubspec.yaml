@@ -54,6 +54,17 @@ dependencies:
   drift_flutter: ^0.3.1
   path_provider: ^2.1.6
 
+# ── CI/构建用：把 path_provider_android 钉到不依赖 jni 的版本 ────────────────
+# 为什么：`path_provider_android` 2.3.x 起改用 JNI 实现（依赖 jni + jni_flutter），
+# 而 `jni` 会**自己编原生代码**（android/build.gradle 里有 ndkVersion + externalNativeBuild/cmake）
+#   → 需要真 NDK（约 1GB，且 dl.google.com 在这台机器上不通）与 SDK 里的 cmake 包。
+# 我们只用 path_provider 拿一个可写目录（见 lib/core/database/），2.2.x 的功能完全一样、
+# 纯 Kotlin 实现、compileSdk 也更低 —— 所以钉住它，省掉整条原生工具链。
+# 2.2.17 的依赖：flutter + path_provider_platform_interface（无 jni）。
+# 拆掉这个 override 的前提：CI 环境里能拿到真 NDK + cmake。
+dependency_overrides:
+  path_provider_android: 2.2.17
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

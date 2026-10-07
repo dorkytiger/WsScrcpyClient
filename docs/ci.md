@@ -381,8 +381,16 @@ Android 构建里每个子项目（app + 每个插件）用**自己的** `compil
 | 项目 | compileSdk | 平台 zip（腾讯镜像，文件名以 Google 官方索引 `repository2-3.xml` 为准） |
 |---|---|---|
 | app（Flutter 3.47 默认） | 36 | `platform-36_r02.zip` |
-| `sqlite3_flutter_libs`（drift 依赖）/ `jni` | 35 | `platform-35_r02.zip` |
+| `path_provider_android` **2.3.x**（会带进 `jni`） | 35 | `platform-35_r02.zip` |
 | `flutter_secure_storage` | 34 | **`platform-34-ext7_r03.zip`**（34 是 ext7 变体，没有 `platform-34_r03.zip`） |
+
+> **别被 `sqlite3_flutter_libs` 骗了**（我一开始就归错因）：drift 自己**不带** SQLite 引擎，
+> 但 `drift_flutter` 现在依赖的是 **`sqlite3_flutter_libs 0.6.0+eol`** —— 那是个**空壳**
+> （包目录里只有 `lib/` + pubspec，**没有 `android/`**，不参与 Android 构建）。
+> `drift_flutter` 的 pubspec 注释写得很直白："This dependency doesn't do anything, but we don't
+> want users depending on version 0.5.x because the sqlite3 package has been migrated to hooks."
+> 也就是说 sqlite3 引擎现在由 `package:sqlite3` 的 **build hooks** 负责（web 上仍是
+> `sqlite3.wasm`，见 §9.3）。
 
 **build-tools 同理**：插件自己用的 AGP（`flutter_secure_storage` 是 8.5.1）默认要
 **34.0.0**，所以 34/35/36 三套都装上（34 的 zip 名带连字符 `build-tools_r34-linux.zip`，
@@ -396,6 +404,33 @@ for d in ~/.pub-cache/hosted/pub.dev/*; do
   printf '%-46s %s\n' "$(basename "$d")" "$(grep -hoE 'compileSdk(Version)?[ =]+[0-9]+' "$f" | head -1)"
 done
 ```
+
+#### ★ 第九个坑（2026-10-07 实测）：`path_provider_android` 2.3.x 带进 `jni` → 要真 NDK + CMake
+
+`path_provider_android` 从 **2.3.x** 起改用 JNI 实现，依赖 `jni` + `jni_flutter`，而 `jni`：
+
+```groovy
+// ~/.pub-cache/hosted/pub.dev/jni-1.0.3/android/build.gradle
+ndkVersion flutter.ndkVersion
+externalNativeBuild { cmake { … } }      // ← 自己编原生代码
+```
+
+→ 需要**真正的 NDK**（第八个坑那个 `source.properties` 标记糊不过 CMake ✗），
+大概率还要 SDK 里的 `cmake;3.22.1` 包 —— 两者都在 `dl.google.com` 上（不通）。
+
+**修法：把 `path_provider_android` 钉到不依赖 jni 的版本**（2.2.x 是纯 Kotlin 实现）：
+
+```yaml
+# pubspec.yaml
+dependency_overrides:
+  path_provider_android: 2.2.17      # 依赖只有 flutter + path_provider_platform_interface
+```
+
+我们只用 path_provider 拿一个可写目录（`lib/core/database/`），2.2.x 功能完全一样。
+拆掉这个 override 的前提：CI 环境能拿到真 NDK + cmake 包。
+
+> **NDK 标记仍要保留**：Flutter 的 `forceNdkDownload()` 对 **app 项目**照样会要 NDK
+> （第八个坑），所以 `$SDK/ndk/<版本>/source.properties` 那个标记不能删。
 
 #### 修法（二选一）
 
