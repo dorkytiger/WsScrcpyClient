@@ -56,13 +56,13 @@ class FakeSecretLocalDatasource extends SecretLocalDatasource {
 
 /// 测试用的一整套依赖。
 class SettingsTestContext {
-  SettingsTestContext({FakeSecretLocalDatasource? secrets})
+  SettingsTestContext({FakeSecretLocalDatasource? secrets, bool? isWeb})
     : secrets = secrets ?? FakeSecretLocalDatasource(),
       database = createMemoryDatabase() {
     profiles = ProfileLocalDatasource(database);
     recentDevices = RecentDeviceLocalDatasource(database);
     repository = SettingsRepository(profiles, recentDevices, this.secrets);
-    service = SettingsService(repository);
+    service = SettingsService(repository, isWeb: isWeb);
   }
 
   final AppDatabase database;
