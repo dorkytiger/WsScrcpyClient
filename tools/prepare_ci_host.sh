@@ -116,9 +116,19 @@ echo "    ✓ 许可文件已写"
 NDK_VERSION="$(sed -n 's/.*ndkVersion: String = "\([^"]*\)".*/\1/p' \
   "$FLUTTER_DIR/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt" | head -1)"
 NDK_VERSION="${NDK_VERSION:-28.2.13676358}"
-mkdir -p "$SDK_DIR/ndk/$NDK_VERSION"
-printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" > "$SDK_DIR/ndk/$NDK_VERSION/source.properties"
-echo "    ✓ NDK 标记：$SDK_DIR/ndk/$NDK_VERSION/source.properties"
+if [ -x "$SDK_DIR/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" ]; then
+  echo "    真 NDK 已在（跳过）"
+else
+  say "下载真 NDK（android-ndk-r28c-linux.zip → NDK $NDK_VERSION，AGP 的 strip 要用它）"
+  tmp="$(mktemp -d)"
+  curl -fSL --retry 3 --retry-delay 2 -o "$tmp/ndk.zip" "$BASE_SDK/android-ndk-r28c-linux.zip"
+  unzip -q "$tmp/ndk.zip" -d "$tmp/x"
+  rm -rf "$SDK_DIR/ndk/$NDK_VERSION"
+  mkdir -p "$SDK_DIR/ndk"
+  mv "$(find "$tmp/x" -mindepth 1 -maxdepth 1 | head -1)" "$SDK_DIR/ndk/$NDK_VERSION"
+  rm -rf "$tmp"
+  echo "    ✓ 真 NDK：$SDK_DIR/ndk/$NDK_VERSION"
+fi
 
 # ── 3. 汇总 ─────────────────────────────────────────────────────────────
 say "准备好啦 —— 各目录大小"

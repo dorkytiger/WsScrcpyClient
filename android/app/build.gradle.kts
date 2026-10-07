@@ -37,21 +37,12 @@ android {
         }
     }
 
-    packaging {
-        jniLibs {
-            // 不剥离 .so 里的调试符号。**这不是风格偏好，是 CI 能不能构建的前提**：
-            //   · 本项目没有原生代码，.so 全是 Flutter 引擎的（上游发布时已经 strip 过），
-            //     再 strip 一次的收益≈0；
-            //   · 而 AGP 的 `stripReleaseDebugSymbols` 固定调用 **NDK 里的 llvm-strip**
-            //     （`ndk/<版本>/toolchains/llvm/prebuilt/<host>/bin/llvm-strip`）；
-            //   · 我们的 CI 里只有 NDK **标记文件**、没有真 NDK
-            //     （为什么要标记见 docs/ci.md 第八个坑；真 NDK 约 1GB 且在连不通的 dl.google.com 上），
-            //     于是那个任务会以 "A problem occurred starting process ... llvm-strip" 直接挂。
-            // 列成 **/*.so 后该任务没有可处理的目标 → 不再调用 llvm-strip。
-            // 代价：APK 里保留引擎库自带的符号（引擎库本来就是 stripped 的，实测体积无感）。
-            keepDebugSymbols += "**/*.so"
-        }
-    }
+    // 注意：**不要**用 `packaging { jniLibs { keepDebugSymbols += "**/*.so" } }` 来绕开
+    // `stripReleaseDebugSymbols` —— 实测那样打出来的 universal APK 有 **517MB**
+    // （引擎 .so 带着调试符号进包；对比：iOS ipa 只有 22MB）。
+    // 正确做法是让 AGP 能真正 strip：CI 里装**真 NDK**（腾讯镜像的
+    // `android-ndk-r28c-linux.zip` == NDK 28.2.13676358，见 tools/ci/Dockerfile），
+    // 它提供 `ndk/<版本>/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip`。
 }
 
 kotlin {

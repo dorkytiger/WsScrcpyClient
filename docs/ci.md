@@ -307,6 +307,21 @@ printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
 > ⚠️ **以后加了带原生代码（NDK）的插件，就必须换成真 NDK**：把
 > `android-ndk-r<xx>-linux.zip` 解到 `$SDK/ndk/<版本>/`。标记文件只是"项目没有原生代码"的取巧。
 
+**★ 更正（同一天，实测打脸）：光有标记文件还不够，要装真 NDK。**
+标记只是让 Flutter 跳过"自动装 NDK"；但 **AGP 的 `stripReleaseDebugSymbols` 照样会**去调
+`ndk/<版本>/toolchains/llvm/prebuilt/<host>/bin/llvm-strip` 剥 .so 的调试符号 →
+标记文件下没有这个可执行文件 → `A problem occurred starting process ... llvm-strip` 失败。
+
+| 做法 | 结果 |
+|---|---|
+| 只放标记文件 | 打包阶段 `stripReleaseDebugSymbols` 失败 |
+| 放标记 + `keepDebugSymbols += "**/*.so"`（跳过 strip） | 能过，但 **universal APK 517MB**（引擎 .so 带调试符号进包；对比 iOS ipa 只有 22MB）✗ |
+| **装真 NDK**（现在采用） | strip 正常，APK 回到正常体积；标记只在真 NDK 装不上时兜底 |
+
+真 NDK **腾讯镜像里有**：`android-ndk-r28c-linux.zip` == NDK `28.2.13676358`
+（正是 Flutter 3.47 默认要的版本，文件名取自官方索引 `repository2-3.xml` 的 `ndk;28.2.13676358`）。
+解压后放到 `$SDK/ndk/28.2.13676358/`（zip 里那层目录名是 `android-ndk-r28c/`，要改名）。
+
 #### ★ 第七个坑（2026-10-07 实测）：**插件自己的 buildscript** 仍然去 `dl.google.com`
 
 ```

@@ -83,7 +83,27 @@ RUN set -eux; \
     rm -f /tmp/pkg.zip; \
     ls "$SDK/platforms" "$SDK/build-tools"
 
-# NDK 标记（**不是**真 NDK，1 个字节的文件）
+# 真 NDK（腾讯镜像里有：`android-ndk-r28c-linux.zip` == NDK 28.2.13676358，正是 Flutter 默认要的版本）
+#
+# **为什么必须装真的**：AGP 的 `stripReleaseDebugSymbols` 固定调用 NDK 里的
+# `ndk/<版本>/toolchains/llvm/prebuilt/<host>/bin/llvm-strip` 去剥 .so 的调试符号；
+#   · 只放"标记文件"→ AGP 以为 NDK 在 → 启动 llvm-strip 时 "A problem occurred starting process" 失败；
+#   · 绕开 strip（`keepDebugSymbols`）→ 实测 universal APK **517MB**（引擎库带符号进包）；
+# 装了真 NDK 两个问题都没有，也不用再依赖标记文件。
+ARG NDK_VERSION=28.2.13676358
+RUN set -eux; \
+    curl -fSL --retry 3 --retry-delay 2 -o /tmp/ndk.zip \
+      "https://mirrors.cloud.tencent.com/AndroidSDK/android-ndk-r28c-linux.zip"; \
+    rm -rf /tmp/ndkx; mkdir -p /tmp/ndkx; \
+    unzip -q /tmp/ndk.zip -d /tmp/ndkx; \
+    rm -rf "/opt/dev/android-sdk/ndk/${NDK_VERSION}"; \
+    mkdir -p /opt/dev/android-sdk/ndk; \
+    mv "$(find /tmp/ndkx -mindepth 1 -maxdepth 1 | head -1)" "/opt/dev/android-sdk/ndk/${NDK_VERSION}"; \
+    rm -rf /tmp/ndk.zip /tmp/ndkx; \
+    cat "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties"; \
+    ls "/opt/dev/android-sdk/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+
+# NDK 标记（**兜底用**：只有在真 NDK 缺失时才写，1 个字节的文件）
 #
 # 为什么需要：Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` 会强制 AGP 拿 NDK；
 # 它判断"NDK 已装"的条件是 —— `$SDK/ndk/<版本>/source.properties` 存在
@@ -93,11 +113,13 @@ RUN set -eux; \
 #   · 没有标记、又没有真 NDK → AGP 报 `NDK not configured. Download it with SDK manager.`（实测）。
 # 本项目没有任何原生代码（Flutter 引擎的 .so 是预编译 AAR 里的），所以真 NDK 用不上。
 # ⚠️ 以后若加了带原生代码的插件，就得换成真 NDK（同版本下载后解到 `ndk/<版本>/`）。
-ARG NDK_VERSION=28.2.13676358
-RUN mkdir -p "/opt/dev/android-sdk/ndk/${NDK_VERSION}" \
- && printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "${NDK_VERSION}" \
-      > "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties" \
- && cat "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties"
+RUN d="/opt/dev/android-sdk/ndk/${NDK_VERSION}"; \
+    if [ -x "$d/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" ]; then \
+      echo "真 NDK 已就位：$d"; \
+    else \
+      echo "⚠️ 没有真 NDK，只放标记（此时 stripReleaseDebugSymbols 会失败）"; \
+      mkdir -p "$d" && printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "${NDK_VERSION}" > "$d/source.properties"; \
+    fi
 
 # Gradle 仓库镜像（init script）：对所有 project 生效，**包括 pub-cache 里的插件** ——
 # flutter_secure_storage 的 android/build.gradle 自己声明了 google() + AGP 8.5.1，

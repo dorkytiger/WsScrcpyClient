@@ -353,10 +353,27 @@ jobs:
           NDK_VERSION="$(sed -n 's/.*ndkVersion: String = "\([^"]*\)".*/\1/p' \
             "$FLUTTER_ROOT_DIR/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt" | head -1)"
           NDK_VERSION="${NDK_VERSION:-28.2.13676358}"
-          mkdir -p "$SDK/ndk/$NDK_VERSION"
-          printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
-            > "$SDK/ndk/$NDK_VERSION/source.properties"
-          echo "已放 NDK 标记：$SDK/ndk/$NDK_VERSION/source.properties（无原生代码，真 NDK 不需要）"
+          # 装**真 NDK**（AGP 的 stripReleaseDebugSymbols 要用它里面的 llvm-strip；
+          # 只放标记会让它"A problem occurred starting process"失败，绕开 strip 又会打出 517MB 的 APK）
+          NDK_LLVM_STRIP="$SDK/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [ ! -x "$NDK_LLVM_STRIP" ]; then
+            echo "下载真 NDK（android-ndk-r28c-linux.zip → NDK $NDK_VERSION）"
+            fetch android-ndk-r28c-linux.zip
+            rm -rf /tmp/ndkx && mkdir -p /tmp/ndkx "$SDK/ndk"
+            unzip -q /tmp/pkg.zip -d /tmp/ndkx
+            rm -rf "$SDK/ndk/$NDK_VERSION"
+            mv "$(find /tmp/ndkx -mindepth 1 -maxdepth 1 | head -1)" "$SDK/ndk/$NDK_VERSION"
+          fi
+          if [ -x "$NDK_LLVM_STRIP" ]; then
+            echo "✓ 真 NDK 就位：$NDK_LLVM_STRIP"
+          else
+            # 兜底：只放标记，让 Flutter 的 forceNdkDownload 跳过 NDK 自动安装
+            #（但 stripReleaseDebugSymbols 仍会失败 —— 这条只在真 NDK 装不上时才会走到）
+            echo "⚠️ 真 NDK 不可用，只放标记"
+            mkdir -p "$SDK/ndk/$NDK_VERSION"
+            printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
+              > "$SDK/ndk/$NDK_VERSION/source.properties"
+          fi
 
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
