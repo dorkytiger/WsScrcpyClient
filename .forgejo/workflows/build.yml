@@ -58,6 +58,10 @@ concurrency:
   group: build-${{ forgejo.ref }}
   cancel-in-progress: true
 
+env:
+  # 与 AGENTS.md §2 对齐；升级 Flutter 时改这里 + pubspec 的 sdk 约束。
+  FLUTTER_VERSION: '3.47.1'
+
 jobs:
   # ── 1. 静态检查 + 单测（与平台无关，跑在 Linux 上最快）────────────────────
   verify:
@@ -72,27 +76,33 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 装 Flutter（版本与 AGENTS.md §2 对齐）
-        # ★ 第三方 action 必须写**全 URL**：runner 的 DEFAULT_ACTIONS_URL 指向
-        #   Forgejo 的镜像 data.forgejo.org，那个镜像**只镜像 `actions/*`**，
-        #   第三方的一律 404（实测：curl .../info/refs?service=git-upload-pack
-        #   → 200=有、302=没有）。官方 `actions/*` 继续走镜像即可。
-        uses: https://github.com/subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.1'
-          channel: stable
-          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
-          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
-          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
-          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
-          cache: false
-
-      - name: 基础工具（镜像里未必带 zip/unzip）
+      - name: 基础工具（镜像里未必带 xz/zip/unzip）
         run: |
           set -e
-          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq zip unzip
+          if ! command -v xz >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
           fi
+
+      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
+        # 为什么不用 `subosito/flutter-action`：
+        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
+        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
+        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
+        run: |
+          set -e
+          FLUTTER_HOME="$HOME/flutter"
+          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+            URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+            echo "下载 $URL"
+            curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
+            tar -xJf /tmp/flutter.tar.xz -C "$(dirname "$FLUTTER_HOME")"
+            rm -f /tmp/flutter.tar.xz
+          fi
+          echo "$FLUTTER_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$FLUTTER_HOME/bin:$PATH"
+          # 容器里以 root 跑，Flutter 会抱怨 git 的 dubious ownership
+          git config --global --add safe.directory "$FLUTTER_HOME"
+          flutter --version
 
       - name: 工具链版本
         run: flutter --version
@@ -124,35 +134,43 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
+      - name: 基础工具（镜像里未必带 zip/unzip/xz）
+        # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
+        #   xz  → 解压 Flutter 的 tar.xz；
+        #   zip → web 那步打包；
+        #   unzip → Android SDK 的 zip 包。
+        run: |
+          set -e
+          if ! command -v xz >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
+          fi
+
       - name: 装 JDK 17（Gradle 要求）
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: 装 Flutter
-        # ★ 第三方 action 必须写**全 URL**：runner 的 DEFAULT_ACTIONS_URL 指向
-        #   Forgejo 的镜像 data.forgejo.org，那个镜像**只镜像 `actions/*`**，
-        #   第三方的一律 404（实测：curl .../info/refs?service=git-upload-pack
-        #   → 200=有、302=没有）。官方 `actions/*` 继续走镜像即可。
-        uses: https://github.com/subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.1'
-          channel: stable
-          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
-          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
-          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
-          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
-          cache: false
-
-      - name: 基础工具（镜像里未必带 zip/unzip）
-        # job 容器用的是 node:*-bookworm 这类镜像，别假设它有 zip/unzip：
-        # web 那步要 zip 打包，Android SDK 的 cmdline-tools 是 zip 包（要 unzip）。
+      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
+        # 为什么不用 `subosito/flutter-action`：
+        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
+        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
+        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
         run: |
           set -e
-          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq zip unzip
+          FLUTTER_HOME="$HOME/flutter"
+          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+            URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+            echo "下载 $URL"
+            curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
+            tar -xJf /tmp/flutter.tar.xz -C "$(dirname "$FLUTTER_HOME")"
+            rm -f /tmp/flutter.tar.xz
           fi
+          echo "$FLUTTER_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$FLUTTER_HOME/bin:$PATH"
+          # 容器里以 root 跑，Flutter 会抱怨 git 的 dubious ownership
+          git config --global --add safe.directory "$FLUTTER_HOME"
+          flutter --version
 
       - name: 装 Android SDK（★ 走腾讯镜像：这台机器连不上 dl.google.com）
         # 实测（2026-10-07，lingke）：github.com / api.adoptium.net / repo.maven.apache.org 都通，
@@ -279,20 +297,37 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 装 Flutter（版本与 AGENTS.md §2 对齐）
-        # ★ 第三方 action 必须写**全 URL**：runner 的 DEFAULT_ACTIONS_URL 指向
-        #   Forgejo 的镜像 data.forgejo.org，那个镜像**只镜像 `actions/*`**，
-        #   第三方的一律 404（实测：curl .../info/refs?service=git-upload-pack
-        #   → 200=有、302=没有）。官方 `actions/*` 继续走镜像即可。
-        uses: https://github.com/subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.1'
-          channel: stable
-          # ★ 先关掉缓存：`cache: true` 需要 **runner 端开了 cache 服务**
-          #   （compose 里 runner 的 `cache.enabled: true` + 缓存目录），否则
-          #   `@actions/cache` 会直接抛 "Cache Service Url not found" 把 job 干挂。
-          #   跑通之后想提速再打开（代价是每次重下 Flutter SDK，约 40s）。
-          cache: false
+      - name: 基础工具（镜像里未必带 zip/unzip/xz）
+        # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
+        #   xz  → 解压 Flutter 的 tar.xz；
+        #   zip → web 那步打包；
+        #   unzip → Android SDK 的 zip 包。
+        run: |
+          set -e
+          if ! command -v xz >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
+          fi
+
+      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
+        # 为什么不用 `subosito/flutter-action`：
+        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
+        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
+        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
+        run: |
+          set -e
+          FLUTTER_HOME="$HOME/flutter"
+          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+            URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+            echo "下载 $URL"
+            curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
+            tar -xJf /tmp/flutter.tar.xz -C "$(dirname "$FLUTTER_HOME")"
+            rm -f /tmp/flutter.tar.xz
+          fi
+          echo "$FLUTTER_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$FLUTTER_HOME/bin:$PATH"
+          # 容器里以 root 跑，Flutter 会抱怨 git 的 dubious ownership
+          git config --global --add safe.directory "$FLUTTER_HOME"
+          flutter --version
 
       - name: 依赖
         run: flutter pub get
@@ -301,15 +336,6 @@ jobs:
       # ② `--no-web-resources-cdn`（否则离线环境永远白屏，见 AGENTS §9.3）
       - name: 构建 web
         run: tools/build_web.sh
-
-      - name: 基础工具（镜像里未必带 zip/unzip）
-        # job 容器用的是 node:*-bookworm 这类镜像，别假设它有 zip/unzip：
-        # web 那步要 zip 打包，Android SDK 的 cmdline-tools 是 zip 包（要 unzip）。
-        run: |
-          set -e
-          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq zip unzip
-          fi
 
       - name: 打包 zip
         run: |

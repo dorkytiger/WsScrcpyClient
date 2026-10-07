@@ -202,6 +202,43 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 > **还没验证的一个点**：`pub.dev` 那台机器通不通（`flutter pub get` 要用）。
 > 如果不通，就在 workflow 里加 `PUB_HOSTED_URL=https://pub.flutter-io.cn`（Flutter 中国镜像）。
 
+#### ★ 第四个坑（2026-10-07 实测）：`subosito/flutter-action` 需要容器里有 `jq`
+
+```
+装 Flutter（版本与 AGENTS.md §2 对齐）  1s
+jq not found. Install it from https://stedolan.github.io/jq
+⚙️ [runner]: exitcode '1': failure
+```
+
+`oci/node:20-bookworm` 里没有 `jq`，而那个 action 依赖它。**修法：干脆不用第三方 action** ——
+自己下官方 tar.xz（版本从 `FLUTTER_VERSION` 环境变量来，与 AGENTS §2 对齐）：
+
+```yaml
+- name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
+  run: |
+    set -e
+    FLUTTER_HOME="$HOME/flutter"
+    if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+      URL="https://storage.googleapis.com/flutter_infra_release/flutter_infra_release/…"
+      # 实际地址：https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz
+      curl -fSL --retry 3 -o /tmp/flutter.tar.xz "$URL"
+      tar -xJf /tmp/flutter.tar.xz -C "$(dirname "$FLUTTER_HOME")"
+    fi
+    echo "$FLUTTER_HOME/bin" >> "$GITHUB_PATH"
+    git config --global --add safe.directory "$FLUTTER_HOME"   # 容器里 root 跑，否则 git 报 dubious ownership
+    flutter --version
+```
+
+顺带三个纪律：
+
+1. **「基础工具」步骤必须排在最前面**（`xz` 解 Flutter 的 tar.xz、`unzip` 解 SDK 的 zip、
+   `zip` 给 web 打包），否则后面的解压步骤会以 `command not found` 挂；
+2. **官方 `actions/*` 用短名即可**（镜像里有：实测 `checkout`/`setup-java`/`upload-artifact`/`cache` 都 200），
+   只有第三方 action 才需要写全 URL（或者干脆像这里一样不用它）；
+3. 确认 tarball 地址的最稳方式：拉
+   `https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`，
+   找 `version == $FLUTTER_VERSION` 的 `archive` 字段（实测 3.47.1 → `stable/linux/flutter_linux_3.47.1-stable.tar.xz`）。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
