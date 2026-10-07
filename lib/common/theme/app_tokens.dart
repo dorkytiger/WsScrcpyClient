@@ -62,14 +62,6 @@ class AppDefaults {
   /// 投流连接等待初始信息头的超时。
   static const Duration streamInitialInfoTimeout = Duration(seconds: 12);
 
-  /// 会话建立后是否自动唤醒被控设备屏幕。
-  ///
-  /// **默认关，且它不是"进去黑屏"的修复**：真实服务端 `bundle.js` 里网页端根本不发唤醒键
-  /// （`WAKEUP` 只命中常量表、没有自动调用点）。黑屏的正解是"视频参数只发一次、
-  /// 且回显服务端给的值"（见 `StreamSessionService._scheduleFirstVideoSettings` 与 AGENTS §12.5）。
-  /// 保留它是因为**有些设备确实会因为屏幕休眠而出不了帧**，需要时用户可以自己开。
-  static const bool wakeDeviceOnConnect = false;
-
   /// 首发视频参数时"等 UI 上报视口尺寸"的时长。
   ///
   /// 等到了就一次到位（带上 bounds，只发一条）；超时则退化为不带 bounds 先发一条，

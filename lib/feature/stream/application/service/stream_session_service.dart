@@ -98,17 +98,6 @@ class StreamSessionService {
   bool _settingsSentForCurrentConnection = false;
   bool _stopped = true;
 
-  /// 是否在会话建立后自动唤醒被控设备屏幕（**可选功能，默认关**）。
-  ///
-  /// 注意：曾经以为它是"进去黑屏"的修复，**这是错的**——真实 `bundle.js` 里服务端网页端
-  /// 根本不发唤醒键（`WAKEUP` 只命中常量表，没有自动调用点）。黑屏的正解是
-  /// "首发视频参数只发一次、且回显服务端值"（见 `_scheduleFirstVideoSettings` 与 AGENTS §12.5）。
-  /// 唤醒保留为**可选**：有些设备确实会因为屏幕休眠而不出帧，用户想开就自己开。
-  bool _wakeOnConnect = AppDefaults.wakeDeviceOnConnect;
-
-  /// 本次连接是否已经发过唤醒键（每条连接只发一次，避免变成"每帧都发控制消息"）。
-  bool _wakeSentForCurrentConnection = false;
-
   /// UI 上报的最新视口尺寸（设备像素）。**连接前就可能已经有值**，
   /// 首发视频参数会带上它（只发一次，见 [_scheduleFirstVideoSettings]）。
   VideoSize? _reportedViewportBounds;
@@ -267,10 +256,18 @@ class StreamSessionService {
     _viewportUpdateSequence++;
     _log(
       '画面尺寸变化（第 $_viewportUpdateSequence 次补发）：请求 ${width}x$height'
+      '，归一化后 ${effective.width}x${effective.height}'
       '${_lastEffectiveBounds == null ? '' : '，上一次生效 ${_lastEffectiveBounds!.width}x'
           '${_lastEffectiveBounds!.height}'}',
     );
-    final sent = _sendVideoSettings(display, bounds: bounds);
+    // ★ 发出去的一定是**归一化后的边界**（与设备同比例 + 档位上限 + 16 宏块对齐）。
+    //
+    // 2026-10-08 排查"Android 第一次进投流页全黑"时发现这条路径有歧义：
+    // 去重比的是 `effective`，但 `_sendVideoSettings` 收的是**原始视口** `bounds`
+    // （竖屏手机上是 1264x2256 这种"比显示高 3 倍、而且是竖屏比例"的值）。
+    // 虽然 `_sendVideoSettings` 内部还会再收敛一次，但"发出去到底是什么"这条链上
+    // 隔着两次转换，日志里也看不出真实值——现在改成**传归一化值**，并在下面打出实际线值。
+    final sent = _sendVideoSettings(display, bounds: effective);
     return sent.isError ? Result.failure(sent.error!) : Result.success(true);
   }
 
@@ -525,8 +522,6 @@ class StreamSessionService {
     _lastParameterSets = null;
     _framesSinceIdr.clear();
     _sawIdr = false;
-    // 唤醒键也是"每条连接只发一次"：重连后设备可能又睡了，所以要重新允许发。
-    _wakeSentForCurrentConnection = false;
     // 连接是新的：首发要等新的初始信息头；兜底定时器也重新算。
     _pendingFirstSettingsDisplay = null;
     _settingsFallbackTimer?.cancel();
@@ -915,6 +910,17 @@ class StreamSessionService {
     );
     // 把"服务端给的"与"我们回的"都打出来，便于逐字段对照（这次排查就是靠它）。
     _log('服务端初始头给的 VideoSettings：$serverSettings');
+    // ★ 线值自证：**每一次**下发都把"请求值 / 收敛后真正写进报文的 bounds"打出来。
+    //   为什么：排查"Android 第一次进页面全黑"时，日志里只能看到视口诊断报的
+    //   `生效编码边界 1264x2256`（竖屏、比显示高 3 倍），而报文里到底装了哪个值
+    //   隔着两层转换看不出来。这一行以后能让"我们的请求是不是错的"一眼判定。
+    _log(
+      '下发视频参数（线值）：bounds=${effectiveBounds == null ? 'null' : '${effectiveBounds.width}x${effectiveBounds.height}'}'
+      '（请求 ${requestedBounds == null ? 'null' : '${requestedBounds.width}x${requestedBounds.height}'}，'
+      '设备原生 ${nativeSize.width}x${nativeSize.height}，档位=${_boundsMode.name}），'
+      'bitrate=${normalized.bitrate} maxFps=${normalized.maxFps} '
+      'iFrameInterval=${normalized.iFrameInterval}，报文 ${normalized.toBuffer().length} 字节',
+    );
     final result = sendControlMessage(
       CommandControlMessage.changeStreamParameters(normalized.toBuffer()),
     );
@@ -937,51 +943,6 @@ class StreamSessionService {
       '首发视频参数（回显服务端值 + bounds=${bounds ?? '服务端给的'}）：$normalized'
       '｜生效编码边界=${effectiveBounds == null ? 'null（服务端默认）' : '${effectiveBounds.width}x${effectiveBounds.height}'}',
     );
-    if (_wakeOnConnect) {
-      // 参数下发成功 = 服务端马上开始编码。唤醒是可选项，默认关（见字段注释）。
-      _wakeDeviceOnce();
-    }
-    return result;
-  }
-
-  /// 是否在会话建立后自动唤醒被控设备屏幕。
-  ///
-  /// 关闭只影响**下一次**连接；打开会立刻补发一次唤醒——用户刚点的开关要马上有反馈，
-  /// 不然他会以为"点了没用"。
-  bool get wakeOnConnect => _wakeOnConnect;
-
-  set wakeOnConnect(bool value) {
-    if (_wakeOnConnect == value) {
-      return;
-    }
-    _wakeOnConnect = value;
-    _log(value ? '已开启：连接后自动唤醒被控设备' : '已关闭：连接后不自动唤醒被控设备');
-    if (value && canSendControl) {
-      _wakeDeviceOnce(force: true);
-    }
-  }
-
-  /// 主动唤醒被控设备屏幕（`KEYCODE_WAKEUP`，按下 + 抬起）。
-  ///
-  /// 为什么需要它：scrcpy **只在画面变化时发帧**。设备屏幕休眠/静止时客户端一帧都收不到，
-  /// 表现就是"进去黑屏、点一下按钮才有反应"（用户实测）。连上后主动按一次唤醒键，
-  /// 屏幕点亮 → 画面开始变化 → 帧才会来。
-  Result<void> wakeDevice() => _wakeDeviceOnce(force: true);
-
-  Result<void> _wakeDeviceOnce({bool force = false}) {
-    if (!force && _wakeSentForCurrentConnection) {
-      return successVoid();
-    }
-    if (!canSendControl) {
-      return failureVoid(const BusinessException(message: '投流未连接，无法唤醒设备'));
-    }
-    final result = pressKey(AndroidKeyCode.wakeup);
-    if (result.isError) {
-      _log('唤醒被控设备失败：${result.error!.message}');
-      return result;
-    }
-    _wakeSentForCurrentConnection = true;
-    _log('已发送唤醒键（KEYCODE_WAKEUP ${AndroidKeyCode.wakeup}），点亮被控设备屏幕');
     return result;
   }
 

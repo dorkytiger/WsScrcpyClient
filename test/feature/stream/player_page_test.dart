@@ -182,14 +182,45 @@ void main() {
     return viewModel;
   }
 
-  testWidgets('底部快捷栏只保留 返回/主页/最近/更多 四个入口', (WidgetTester tester) async {
+  testWidgets('底部快捷栏：返回/主页/最近/旋转/更多（旋转转的是**本机界面**）', (
+    WidgetTester tester,
+  ) async {
+    // 抓 `flutter/platform` 上的调用：`SystemChrome.setPreferredOrientations` 就是"转本机"。
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (MethodCall call) async {
+        calls.add(call);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
     final transport = _FakeTransport();
     await pumpPlayer(tester, transport);
 
     expect(find.text('返回'), findsOneWidget);
     expect(find.text('主页'), findsOneWidget);
     expect(find.text('最近'), findsOneWidget);
+    expect(find.text('旋转'), findsOneWidget);
     expect(find.text('更多'), findsOneWidget);
+
+    // 默认测试画布 800x600 是**横屏** → 这一按应该请求转成竖屏。
+    await tester.tap(find.text('旋转'));
+    await tester.pump();
+    final rotate = calls.firstWhere(
+      (MethodCall call) => call.method == 'SystemChrome.setPreferredOrientations',
+      orElse: () => fail('没有发出 setPreferredOrientations —— 按钮没接上本机旋转'),
+    );
+    expect(
+      (rotate.arguments! as List<Object?>).cast<String>(),
+      <String>['DeviceOrientation.portraitUp'],
+    );
 
     // 旧设计把音量/电源/旋转/面板平铺在底部，这次改版后不应该再出现。
     expect(find.text('音量 +'), findsNothing);
@@ -210,7 +241,6 @@ void main() {
     expect(find.text('音量 −'), findsOneWidget);
     expect(find.text('电源键'), findsOneWidget);
     expect(find.text('旋转设备屏幕'), findsOneWidget);
-    expect(find.text('唤醒设备屏幕'), findsOneWidget);
     expect(find.text('断开投流'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -231,6 +261,17 @@ void main() {
     tester.view.devicePixelRatio = 3;
     // 真机横屏时底部有 Home Indicator 的安全区（~21pt），SafeArea 会吃掉它，
     // 面板可用高度比"纯 402"更小 —— 这正是真机溢出、而纯 402 测不出来的差别。
+    tester.view.padding = const FakeViewPadding(bottom: 21 * 3);
+    addTearDown(tester.view.reset);
+  }
+
+  /// 竖屏手机（402x874 逻辑点 @3）。
+  ///
+  /// 为什么需要它：默认的 800x600 画布是**横屏**（宽 > 高），而竖屏才有 AppBar + 底部快捷栏
+  /// ——「填满屏幕」要藏起来的正是这两条。
+  void portraitPhone(WidgetTester tester) {
+    tester.view.physicalSize = const Size(402 * 3, 874 * 3);
+    tester.view.devicePixelRatio = 3;
     tester.view.padding = const FakeViewPadding(bottom: 21 * 3);
     addTearDown(tester.view.reset);
   }
@@ -261,7 +302,6 @@ void main() {
     });
     final transport = _FakeTransport();
     final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
-    expect(viewModel.fillCutout, isFalse, reason: '默认必须是避让');
 
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
     final video = tester.getRect(find.byType(Texture));
@@ -285,10 +325,12 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('★ 打开"画面填满到灵动岛"：画面铺到左右边缘（缺口可能遮一角）', (
+  testWidgets('★ 填满屏幕：藏起上下边栏、画面占满整屏；左滑退出；日志搬进"更多"', (
     WidgetTester tester,
   ) async {
-    landscapePhoneWithCutout(tester);
+    // 2026-10-08 用户要求：右上角原本的"日志"按钮改成「填满屏幕」；日志挪进「更多」；
+    // 填满 = 隐藏上下边栏 + 画面铺满；退出靠画面上的**左滑**；「更多」里不再有铺满开关。
+    portraitPhone(tester);
     mockVideoChannel((MethodCall call) async {
       if (call.method == 'create') {
         return <Object?, Object?>{'textureId': 9};
@@ -298,40 +340,116 @@ void main() {
     final transport = _FakeTransport();
     final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
 
-    viewModel.setFillCutout(true);
-    await tester.pump();
-    // 布局变了会走视口防抖（350ms）→ 参数下发；把计时器跑完，别留 pending timer。
-    await tester.pump(const Duration(milliseconds: 400));
+    // 填满之前：竖屏有 AppBar（上边栏）与底部快捷栏（下边栏），画面只是中间一条。
+    expect(find.byType(AppBar), findsOneWidget);
+    expect(find.text('返回'), findsOneWidget);
+    final bandRect = tester.getRect(find.byType(Texture));
+    final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    expect(bandRect.height, lessThan(screen.height * 0.5), reason: '竖屏下画面本来只有一条');
 
-    final video = tester.getRect(find.byType(Texture));
+    // 点右上角那个按钮（原本是"日志"）→ 进填满。
+    await tester.tap(find.byTooltip('填满屏幕（隐藏上下边栏，左滑退出）'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400)); // 视口防抖
+
+    expect(viewModel.fillScreen, isTrue);
+    expect(find.byType(AppBar), findsNothing, reason: '上边栏要藏起来');
+    expect(find.text('返回'), findsNothing, reason: '下边栏（快捷栏）也要藏起来');
+    expect(find.text('更多'), findsNothing);
+
+    // ★ 填满时**系统返回不能直接退出投流页**（左边缘起手的滑动会被 Android 系统返回手势吃掉，
+    //   页内收不到指针事件 —— 用户 2026-10-08 实测"左滑只会返回上一层"）。
+    //   拦下来之后，系统返回 = 退出填满屏幕。
+    final popScope = tester
+        .widgetList(find.byWidgetPredicate((Widget w) => w is PopScope<Object?>))
+        .cast<PopScope<Object?>>()
+        .first;
     expect(
-      video.left,
-      lessThan(59),
-      reason: '填满模式应该铺到左边，实际 left=${video.left}',
+      popScope.canPop,
+      isFalse,
+      reason: '填满时系统返回不能直接 pop 掉投流页',
     );
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(
+      viewModel.fillScreen,
+      isFalse,
+      reason: '系统返回应该退出填满屏幕，而不是返回上一层',
+    );
+    expect(find.byType(AppBar), findsOneWidget, reason: '页面还在，只是退出了填满');
+
+    // 再进一次，继续量几何、走页内左滑那条路。
+    await tester.tap(find.byTooltip('填满屏幕（隐藏上下边栏，左滑退出）'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(viewModel.fillScreen, isTrue);
+
+    final fullRect = tester.getRect(find.byType(Texture));
+    expect(
+      fullRect.height,
+      greaterThanOrEqualTo(bandRect.height - 1),
+      reason: '填满后画面不该变小（屏幕全给它了）',
+    );
+    // ★ 关键：**不许超出屏幕**（fit，不是 cover）。
+    expect(fullRect.left, greaterThanOrEqualTo(-1));
+    expect(fullRect.top, greaterThanOrEqualTo(-1));
+    expect(
+      fullRect.right,
+      lessThanOrEqualTo(screen.width + 1),
+      reason: '画面右边超出屏幕了：${fullRect.right} > ${screen.width}',
+    );
+    expect(
+      fullRect.bottom,
+      lessThanOrEqualTo(screen.height + 1),
+      reason: '画面下边超出屏幕了：${fullRect.bottom} > ${screen.height}',
+    );
+    // 比例不变 → 确实是"按横竖算出来的 fit"，没被拉伸也没被裁。
+    final videoSize = viewModel.videoSize!;
+    expect(
+      fullRect.width / fullRect.height,
+      closeTo(videoSize.width / videoSize.height, 0.02),
+      reason: '填满后必须保持画面比例',
+    );
+    // 让那条"左滑退出"的提示自己消失，顺便把计时器跑完。
+    await tester.pump(const Duration(seconds: 3));
+
+    // 左滑 → 退出填满，边栏回来。
+    await tester.fling(find.byType(Texture), const Offset(-120, 0), 800);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(viewModel.fillScreen, isFalse);
+    expect(find.byType(AppBar), findsOneWidget);
+    expect(find.text('返回'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    // 日志在「更多」里；铺满的开关已经删掉。
+    await tester.tap(find.text('更多'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('日志'), findsOneWidget);
+    expect(find.text('铺满屏幕'), findsNothing);
+    await tester.pump(const Duration(milliseconds: 400));
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('"更多"面板里有"画面填满到灵动岛"开关，默认关且能打开', (WidgetTester tester) async {
+  testWidgets('★ 回归：两个开关已删掉（"画面填满到灵动岛" / "连接后自动唤醒设备"）', (
+    WidgetTester tester,
+  ) async {
+    // 2026-10-08 用户要求：
+    // - "填满到灵动岛"**没有意义**（只是把 59 点空白换回来，缺口还可能压住内容）；
+    // - "连接后自动唤醒设备"的前提是**误判**（详见 AGENTS §12.5）。
+    // 删掉之后横屏**一律避让**（上面那条用例量了几何），面板里也不该再出现这两项。
     landscapePhoneWithCutout(tester);
     final transport = _FakeTransport();
-    final viewModel = await pumpPlayer(tester, transport);
+    await pumpPlayer(tester, transport);
 
     await tester.tap(find.text('更多'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    final switchFinder = find.ancestor(
-      of: find.text('画面填满到灵动岛'),
-      matching: find.byType(SwitchListTile),
-    );
-    expect(switchFinder, findsOneWidget);
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
-
-    await tester.tap(switchFinder);
-    await tester.pump();
-    expect(viewModel.fillCutout, isTrue);
-    // 同上：等防抖计时器跑完，否则 teardown 会报 "A Timer is still pending"。
+    expect(find.text('画面填满到灵动岛'), findsNothing);
+    expect(find.text('连接后自动唤醒设备'), findsNothing);
+    // 防抖计时器跑完，别留 pending timer。
     await tester.pump(const Duration(milliseconds: 400));
     expect(tester.takeException(), isNull);
   });
@@ -410,34 +528,8 @@ void main() {
       reason: '横屏小高度下面板溢出了（真机上就是那条 BOTTOM OVERFLOWED）',
     );
     // 内容仍在（放不下时靠滚动，不是被裁掉）。
-    expect(find.text('连接后自动唤醒设备'), findsOneWidget);
+    expect(find.text('低延迟优先'), findsOneWidget);
     expect(find.text('断开投流'), findsOneWidget);
-  });
-
-  testWidgets('"更多"面板里有"连接后自动唤醒设备"开关，默认关且能打开', (WidgetTester tester) async {
-    final transport = _FakeTransport();
-    final viewModel = await pumpPlayer(tester, transport);
-
-    await tester.tap(find.text('更多'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(find.text('连接后自动唤醒设备'), findsOneWidget);
-    // 面板里现在有**两个**开关（唤醒 + 铺满），按标题定位到唤醒那个。
-    final switchFinder = find.ancestor(
-      of: find.text('连接后自动唤醒设备'),
-      matching: find.byType(SwitchListTile),
-    );
-    expect(switchFinder, findsOneWidget);
-    // 默认**关**：唤醒只是可选项——真实服务端网页端并不发唤醒键，
-    // 黑屏的正解是"视频参数只发一次 + 回显服务端值"（见 AGENTS §12.5）。
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
-    expect(viewModel.wakeOnConnect, isFalse);
-
-    await tester.tap(switchFinder);
-    await tester.pump();
-    expect(viewModel.wakeOnConnect, isTrue);
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
   });
 
   testWidgets('非原生平台（Linux）：给出可读的降级说明，不尝试解码', (WidgetTester tester) async {
@@ -764,7 +856,9 @@ void main() {
   // 横屏布局：顶栏收起 + 快捷栏竖排贴右 + "铺满"显示模式
   // ---------------------------------------------------------------------------
 
-  testWidgets('★ 横屏：顶栏收起（把高度让给画面），常驻小按钮能唤回', (WidgetTester tester) async {
+  testWidgets('★ 横屏：顶栏收起（把高度让给画面），唤出入口在**竖排快捷栏里**（不压画面）', (
+    WidgetTester tester,
+  ) async {
     landscapePhone(tester);
     mockVideoChannel((MethodCall call) async {
       if (call.method == 'create') {
@@ -779,10 +873,24 @@ void main() {
     expect(find.byType(AppBar), findsNothing);
     expect(find.text('测试设备'), findsNothing, reason: '标题默认收起');
 
-    // 但必须留一个常驻入口把它唤回来（**不能**用"点画面"，那是发给设备的）。
-    final handle = find.byTooltip('显示标题栏');
-    expect(handle, findsOneWidget);
-    await tester.tap(handle);
+    // ★ 唤出入口必须在**快捷栏里**（画面区之外）。以前那个浮在画面左上角的半透明小圆钮
+    //   会**抢走它下面那一片区域的点击**（用户 2026-10-08 反馈"挡住投流内容、某些区域点不了"）。
+    expect(
+      find.byTooltip('显示标题栏'),
+      findsNothing,
+      reason: '画面上不该再有任何浮层按钮',
+    );
+    final chromeButton = find.text('顶栏');
+    expect(chromeButton, findsOneWidget);
+    final videoRect = tester.getRect(find.byType(Texture));
+    final buttonRect = tester.getRect(chromeButton);
+    expect(
+      buttonRect.overlaps(videoRect),
+      isFalse,
+      reason: '「顶栏」按钮压在画面上会抢点击（button=$buttonRect video=$videoRect）',
+    );
+
+    await tester.tap(chromeButton);
     await tester.pump();
     expect(find.byTooltip('收起顶栏（把高度让给画面）'), findsOneWidget);
     expect(find.text('测试设备'), findsOneWidget);
@@ -791,11 +899,20 @@ void main() {
     // 所以顶栏里必须自带一个"返回设备列表"（用户实测："左上角也没有返回键"）。
     expect(find.byTooltip('返回设备列表'), findsOneWidget);
 
-    // 顶栏里的"铺满"按钮能切模式。
-    expect(viewModel.videoFitMode, VideoFitMode.contain);
-    await tester.tap(find.byTooltip('铺满屏幕（会裁掉画面上下边缘）'));
+    // 顶栏里的「填满屏幕」（这个位置原本是"日志"按钮）能进填满状态。
+    expect(viewModel.fillScreen, isFalse);
+    await tester.tap(find.byTooltip('填满屏幕（隐藏上下边栏，左滑退出）'));
     await tester.pump();
-    expect(viewModel.videoFitMode, VideoFitMode.cover);
+    expect(viewModel.fillScreen, isTrue);
+    expect(
+      viewModel.videoFitMode,
+      VideoFitMode.contain,
+      reason: '填满必须是 fit：cover 会超出屏幕、裁掉内容（用户明确否掉）',
+    );
+    viewModel.setFillScreen(false);
+    await tester.pump();
+    expect(viewModel.fillScreen, isFalse);
+    expect(viewModel.videoFitMode, VideoFitMode.contain, reason: '退出后还原原来的显示方式');
   });
 
   testWidgets('★ 横屏：快捷栏竖排、贴右侧；画面撑满可用高度', (WidgetTester tester) async {
@@ -818,14 +935,22 @@ void main() {
     expect(home.dy, greaterThan(back.dy));
     expect(back.dx, greaterThan(screen.width / 2), reason: '快捷栏应该在右侧');
 
-    // ★ 紧凑：4 个按钮要收成一组（用户实测："右边按钮区域太松散了"）。
-    // 之前用 spaceEvenly，4 个按钮被摊到 ~400 点里，看着散、拇指也够不着。
+    // ★ 紧凑：按钮要收成一组（用户实测："右边按钮区域太松散了"）。
+    // 横屏这一栏现在是 6 个：返回 / 主页 / 最近 / 旋转 / 更多 / 顶栏 ——
+    // 402 点里必须放得下，而且整组要竖直居中（不然拇指够不着）。
     final top = tester.getRect(find.text('返回'));
-    final bottom = tester.getRect(find.text('更多'));
+    final bottom = tester.getRect(find.text('顶栏'));
+    final span = bottom.bottom - top.top;
     expect(
-      bottom.bottom - top.top,
-      lessThan(200),
-      reason: '4 个按钮的竖向跨度应该收在一个紧凑组里，实际 ${bottom.bottom - top.top}',
+      span,
+      lessThan(screen.height - 8),
+      reason: '6 个按钮的竖向跨度要塞进这一列，实际 $span / ${screen.height}',
+    );
+    expect(top.top, greaterThan(0), reason: '别顶出屏幕');
+    expect(
+      (top.top - (screen.height - bottom.bottom)).abs(),
+      lessThan(24),
+      reason: '这一组应该竖直居中',
     );
     // 整条竖栏也不要占太多宽度（每一点都是从画面里抠出来的）。
     expect(
@@ -877,11 +1002,10 @@ void main() {
     await tester.pump();
     expect(actions(), isEmpty, reason: '黑边上的点击不该发给设备');
 
-    // 切到铺满（走"更多"面板这条真实入口）。
-    await tester.tap(find.text('更多'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('铺满屏幕'));
+    // 切到铺满（cover）。它的 UI 入口现在是「填满屏幕」，但那条路还会隐藏边栏、
+    // 改变画面控件的尺寸；这条用例要量的是"原来黑边的位置在 cover 下能发出去"，
+    // 所以直接切显示方式，几何保持可控。
+    viewModel.setVideoFitMode(VideoFitMode.cover);
     await tester.pump();
     expect(viewModel.videoFitMode, VideoFitMode.cover);
 
@@ -1231,19 +1355,11 @@ void main() {
       expect(center.first[1], closeTo(640, 40), reason: '正中的视频 x 应该在 640 附近');
       expect(center.first[2], closeTo(360, 40), reason: '正中的视频 y 应该在 360 附近');
 
-      // 切"铺满"（真实入口：更多面板里的开关）。
-      await tester.tap(find.text('更多'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      final switchFinder = find.text('铺满屏幕');
-      await tester.ensureVisible(switchFinder);
-      await tester.pump();
-      await tester.tap(switchFinder);
+      // 切"铺满"（cover）。UI 入口现在是「填满屏幕」，但那条路还会隐藏边栏、改变控件尺寸，
+      // 这条用例要量的是"黑边位置在 cover 下能发出去"，所以直接切显示方式。
+      viewModel.setVideoFitMode(VideoFitMode.cover);
       await tester.pump();
       expect(viewModel.videoFitMode, VideoFitMode.cover);
-      // 关掉面板（面板挡在画面上时点击不会到 Listener）。
-      await tester.tapAt(const Offset(5, 5));
-      await tester.pumpAndSettle();
 
       transport.sent.clear();
       await tester.tapAt(barPoint);
@@ -1307,18 +1423,22 @@ void main() {
     expect(find.text('重试解码'), findsOneWidget);
   });
 
-  testWidgets('★ web：把"订阅之前到达"的参数集 + IDR 补喂给后建的解码器（否则永远全黑）', (
+  testWidgets('★ 把"订阅之前到达"的参数集 + IDR 补喂给后建的解码器（否则永远全黑）', (
     WidgetTester tester,
   ) async {
     // 复现真机时序：服务端的 header 与头几帧经常在同一个事件循环里投递完，
     // 此时 viewmodel 还没订阅 videoFrames（广播流没有监听者 → 直接丢）；
     // 设备画面静止时又不会再发帧 → 解码器永远拿不到 SPS = 全黑且无报错。
+    //
+    // ★ 2026-10-08：这条以前只在 web 上成立（`if (_isWeb)`），**Android 冷启动同样中招**
+    //   （第一次进投流页必黑：心跳 `收到 10 / 已解出 0 / 尺寸变化 0 次`，退出再进就好）——
+    //   所以现在**四端都补喂**，这个用例不再传 `isWeb: true`，挡的就是原生那条路。
     final transport = _FakeTransport();
     final service = StreamSessionService(_FakeStreamRemoteDatasource(transport));
     addTearDown(service.dispose);
     final decoder = _RecordingVideoDecoder();
     addTearDown(decoder.dispose);
-    final viewModel = PlayerViewModel(service, decoder: decoder, isWeb: true);
+    final viewModel = PlayerViewModel(service, decoder: decoder);
     addTearDown(viewModel.dispose);
 
     await tester.pumpWidget(

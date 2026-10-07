@@ -89,7 +89,7 @@ void main() {
 
   /// 按控制消息类型筛出客户端发出去的帧（首字节就是 type）。
   ///
-  /// 为什么需要它：连上之后还会发唤醒键（如果开了）与尺寸补发，直接数 `sent.length`
+  /// 为什么需要它：连上之后除了首发参数还会有尺寸补发等控制帧，直接数 `sent.length`
   /// 会让"只下发一次参数"这类断言变得又脆又难读。
   List<Uint8List> framesOfType(int type) => transport.sent
       .where((Uint8List frame) => frame.isNotEmpty && frame[0] == type)
@@ -320,46 +320,32 @@ void main() {
     );
   });
 
-  test('唤醒是可选项：默认关，打开后发一次 KEYCODE_WAKEUP', () async {
-    // 默认关：真实服务端 bundle 里网页端根本不发唤醒键，黑屏的正解是"只发一次参数 +
-    // 回显服务端值"，唤醒只是给"屏幕休眠导致不出帧"的设备留的可选开关。
-    expect(service.wakeOnConnect, isFalse);
+  test('★ 再也不发唤醒键：整条链路没有任何 KEYCODE_WAKEUP', () async {
+    // 2026-10-08 用户要求删掉"连接后自动唤醒设备"与手动唤醒：
+    // 加它的前提（"设备屏幕休眠 → 服务端不出帧 → 黑屏"）是**误判** ——
+    // 真实服务端网页端根本不发唤醒键（`WAKEUP` 只命中常量表），黑屏的正解是
+    // "参数只下发一次 + 回显服务端值"（见 AGENTS §12.5）。
     await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+
+    final keyCodes = framesOfType(ControlMessageType.keycode.code);
+    expect(keyCodes, isEmpty, reason: '连上之后不该有任何按键帧');
+    expect(
+      transport.sent.any(
+        (Uint8List frame) =>
+            frame.length > 1 &&
+            frame[0] == ControlMessageType.keycode.code &&
+            keyCodeOf(frame) == AndroidKeyCode.wakeup,
+      ),
+      isFalse,
+      reason: '整条连接里不该出现 KEYCODE_WAKEUP',
+    );
+
+    // 再收一次初始信息头（历史上正是这条路径会补发唤醒键）也不该有按键帧。
     transport.emit(loadInitialInfoFixture());
     await pumpEventQueue();
     expect(framesOfType(ControlMessageType.keycode.code), isEmpty);
-
-    // 打开开关 → 立刻补发一次（用户在面板里刚点的开关要马上有反馈）。
-    service.wakeOnConnect = true;
-    final keyCodes = framesOfType(ControlMessageType.keycode.code);
-    expect(keyCodes, hasLength(2), reason: '唤醒键应该是 down + up 两条');
-    expect(keyCodeOf(keyCodes[0]), AndroidKeyCode.wakeup);
-    expect(keyCodeOf(keyCodes[1]), AndroidKeyCode.wakeup);
-    // 第 1 字节是动作：0=down，1=up。
-    expect(keyCodes[0][1], 0);
-    expect(keyCodes[1][1], 1);
-
-    // 重复收到初始信息头不会再发一次唤醒（每条连接只发一次）。
-    transport.emit(loadInitialInfoFixture());
-    await pumpEventQueue();
-    expect(framesOfType(ControlMessageType.keycode.code), hasLength(2));
-  });
-
-  test('开了自动唤醒时：参数下发成功后自动发一次唤醒键', () async {
-    service.wakeOnConnect = true;
-    await service.start(target);
-    transport.emit(loadInitialInfoFixture());
-    await pumpEventQueue();
-
-    expect(framesOfType(ControlMessageType.keycode.code), hasLength(2));
-    expect(
-      keyCodeOf(framesOfType(ControlMessageType.keycode.code)[0]),
-      AndroidKeyCode.wakeup,
-    );
-  });
-
-  test('未连接时唤醒返回失败而不是抛异常', () {
-    expect(service.wakeDevice().isError, isTrue);
   });
 
   test('视频帧按 Annex-B 原样转发到 videoFrames 流，并累计计数', () async {
@@ -417,7 +403,7 @@ void main() {
 
     final result = service.pressNavigationKey(NavigationKey.home);
     expect(result.isSuccess, isTrue);
-    // 默认不开唤醒，所以 keycode 帧只有 Home 的 down/up。
+    // 客户端不会再自动发任何按键（唤醒功能已删除），所以 keycode 帧只有 Home 的 down/up。
     final keyCodes = framesOfType(ControlMessageType.keycode.code);
     expect(keyCodes, hasLength(2));
     expect(keyCodeOf(keyCodes[0]), NavigationKey.home.keyCode);

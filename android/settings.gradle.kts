@@ -11,6 +11,11 @@ pluginManagement {
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
     repositories {
+        // 阿里云镜像在前、官方源在后：理由与 android/build.gradle.kts 里那段相同
+        // （本机访问 dl.google.com 会 TLS 握手失败，而镜像可达；镜像没有的仍回落官方源）。
+        maven("https://maven.aliyun.com/repository/google")
+        maven("https://maven.aliyun.com/repository/public")
+        maven("https://maven.aliyun.com/repository/gradle-plugin")
         google()
         mavenCentral()
         gradlePluginPortal()

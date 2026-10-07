@@ -26,9 +26,7 @@ import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 /// 职责边界：会话生命周期与解码器编排在这里触发，具体协议/解码实现都在 service 与
 /// [VideoDecoder] 的实现里；这里只维护"给 UI 看的状态"。
 class PlayerViewModel extends ChangeNotifier {
-  /// [isWeb] 只给测试用（VM 里 `isWebPlatform` 恒为 false，验不了 web 专属分支）。
-  PlayerViewModel(this._sessionService, {VideoDecoder? decoder, bool? isWeb})
-    : _isWeb = isWeb ?? isWebPlatform {
+  PlayerViewModel(this._sessionService, {VideoDecoder? decoder}) {
     // late final + 初始化列表之外赋值：`createVideoDecoder` 需要拿 `_appendLog`（进日志面板），
     // 而初始化列表里不允许碰 this。
     _decoder = decoder ?? createVideoDecoder(onLog: _appendLog);
@@ -45,7 +43,6 @@ class PlayerViewModel extends ChangeNotifier {
 
   final StreamSessionService _sessionService;
   late final VideoDecoder _decoder;
-  final bool _isWeb;
 
   /// 输入链路诊断（用户报告的"点一次触发两次 / 总差上一次"靠这几条定性）。
   final AppLogger _inputLogger = AppLogger('Input');
@@ -135,27 +132,6 @@ class PlayerViewModel extends ChangeNotifier {
   /// 而且在不少设备上两档算出来是同一个边界 —— 现在是按倍数分档 + 面板显示实测数字，
   /// 见 [VideoBoundsMode] 的注释与 AGENTS §16.3。
   VideoBoundsMode get defaultBoundsMode => VideoBoundsMode.maximum;
-
-  /// 是否在连接建立后自动唤醒被控设备屏幕（默认开，见 `AppDefaults.wakeDeviceOnConnect`）。
-  bool get wakeOnConnect => _sessionService.wakeOnConnect;
-
-  /// 切换自动唤醒。打开时会立刻补发一次唤醒键（用户刚点的开关要马上有反馈）。
-  void setWakeOnConnect(bool value) {
-    _sessionService.wakeOnConnect = value;
-    _notify();
-  }
-
-  /// 手动唤醒一次被控设备屏幕。
-  ///
-  /// 用途：投流中途设备又睡了（画面停住），用户可以直接按一下唤醒而不用重连。
-  Result<void> wakeDevice() {
-    final result = _sessionService.wakeDevice();
-    if (result.isError) {
-      _logs.add('唤醒设备失败：${result.error!.message}');
-      _notify();
-    }
-    return result;
-  }
 
   /// 建立投流会话。
   Future<void> connect({
@@ -536,27 +512,32 @@ class PlayerViewModel extends ChangeNotifier {
   VideoFitMode get videoFitMode => _videoFitMode;
   VideoFitMode _videoFitMode = VideoFitMode.contain;
 
-  /// 横屏时画面是否**铺到灵动岛/刘海下面**。
+  /// 是否处于"**填满屏幕**"状态（2026-10-08 用户要求）。
   ///
-  /// 默认 `false` = 避让：iOS 横屏会把刘海那一侧的安全区**左右都报成 ~59 点**
-  /// （因为系统不告诉你缺口在哪一侧），所以画面左右各让一条，缺口永远压不到内容上。
-  /// 打开 = 画面铺满整块屏幕，缺口可能遮住画面一角（换来左右多 ~118 点宽度，
-  /// 只有"画面宽度受限"的设备上才真的变大——多数手机横屏是高度受限）。
+  /// 打开 = 隐藏上下边栏（竖屏的 AppBar + 底部快捷栏；横屏的顶栏浮层 + 竖排快捷栏 + 日志面板），
+  /// 把**整块屏幕**都交给画面。
   ///
-  /// 用户 2026-10-07 反馈"灵动岛挡住了"，就是缺了这条避让。
-  bool get fillCutout => _fillCutout;
-  bool _fillCutout = false;
+  /// **画面走 fit（[VideoFitMode.contain]）：按横竖屏算出来、绝对不超出屏幕、不裁切。**
+  /// 竖屏是"宽度顶满、上下留黑"，横屏是"高度顶满、左右留黑" —— 这是 16:9 画面与屏幕比例
+  /// 不一致时的必然结果；用 cover 去"填满"就会**超出屏幕**（裁掉内容），那不是填满，是裁切。
+  /// 用户 2026-10-08 明确否掉了 cover 那条。
+  ///
+  /// 进入时记住用户原本的显示方式，退出（画面左滑）时还原。
+  bool get fillScreen => _fillScreen;
+  bool _fillScreen = false;
+  VideoFitMode _fitBeforeFillScreen = VideoFitMode.contain;
 
-  /// 切换"画面是否填满到灵动岛/刘海"（只影响横屏；竖屏顶栏本来就避开了）。
-  void setFillCutout(bool value) {
-    if (_fillCutout == value) {
+  /// 进入 / 退出"填满屏幕"。
+  void setFillScreen(bool value) {
+    if (_fillScreen == value) {
       return;
     }
-    _fillCutout = value;
-    _inputLogger.info('画面${value ? '填满到灵动岛（可能被遮一角）' : '避让灵动岛/刘海'}');
-    // 几何变了 → 输入换算与视口上报都要重算（画面区尺寸会变）。
-    _lastRenderDiagnosticsSignature = null;
-    _maybeLogRenderDiagnostics();
+    if (value) {
+      _fitBeforeFillScreen = _videoFitMode;
+    }
+    _fillScreen = value;
+    setVideoFitMode(value ? VideoFitMode.contain : _fitBeforeFillScreen);
+    _inputLogger.info(value ? '填满屏幕（隐藏上下边栏，左滑退出）' : '退出填满屏幕');
     _notify();
   }
 
@@ -871,14 +852,24 @@ class PlayerViewModel extends ChangeNotifier {
       _maybeLogRenderDiagnostics();
       // 只在这里订阅视频帧：之前的帧由广播流丢弃，避免喂给未就绪的解码器。
       _frameSubscription = _sessionService.videoFrames.listen(_onVideoFrame);
-      // ★ web 例外：那边解码器是"后建"的（要先有 DOM 平台视图），而服务端可能在我们订阅
-      // 之前就把「参数集 + 首个 IDR」推完并丢掉了（broadcast 流没有监听者）——设备画面静止时
-      // 又不会再发帧，于是永远 configure 不了 = 全黑无解释（2026-10-07 实测）。
-      // 所以补喂最近一段"从 IDR 开始"的序列（原生三端不依赖这个，保持原行为不动）。
-      if (_isWeb) {
-        for (final Uint8List frame in _sessionService.replayFramesForNewDecoder()) {
-          unawaited(_decoder.pushFrame(frame));
-        }
+      // ★ 但"之前的帧"必须补喂回来 —— **四端都要做，Android 尤其要**。
+      //
+      // 服务端在连接建立后立刻就把「参数集 + 首个 IDR」推过来（常和初始头在同一个事件循环里），
+      // 而我们的解码器是**后建**的（要先拿到 displayInfo），广播流没有监听者就直接丢。
+      // 丢了 SPS/PPS + IDR 之后只剩 P 帧：解码器**一帧也解不出来，而且不报错**，
+      // 表现就是"全黑、无任何提示"，要等到下一个 IDR（画面大改 / 编码器重建）才有画面。
+      //
+      // 2026-10-08 真机实测（Android 16，第一次进投流页必现、退出再进就好）：
+      //   心跳 `收到 10，已喂入 10，**已解出 0**，丢弃 0，队列深度 0，帧间隔 —，
+      //         尺寸 1280x720，尺寸变化 0 次`；同刻整屏截图 4 秒 0 像素变化、
+      //   视频区亮度 0.0、`E/Surface: clearBuffersForDisconnectLocked: 1 buffers were freed…`。
+      //   `已解出 0` + `尺寸变化 0 次` = 解码器从没拿到可解样本（真实尺寸只在解出后才上报）。
+      //   **冷启动时 MediaCodec 的 create 慢**（logcat 里一整套 Codec2/Codec2Client 初始化），
+      //   首发那段必然落在订阅之前；第二次进页面时编解码器已经热了、create 几毫秒返回，
+      //   正好没错过 → 所以"退出再进就正常"，且 100% 复现。
+      // 原先这里写着 `if (_isWeb)`，注释还断言"原生三端不依赖这个"——被上面的日志推翻。
+      for (final Uint8List frame in _sessionService.replayFramesForNewDecoder()) {
+        unawaited(_decoder.pushFrame(frame));
       }
       _logs.add('原生解码器已启动（textureId=$_textureId）');
     } finally {

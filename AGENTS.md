@@ -96,7 +96,7 @@ web 端还没上真机复验过**触摸**（`pointer-events:none` 那条只在�
 |---|---|---|---|
 | **Windows** | Media Foundation H.264 解码器 MFT | 创建后、开始流**之前**：`IMFAttributes::SetUINT32(MF_LOW_LATENCY, TRUE)` | **默认缓冲约 1.2 秒（30fps ≈ 38 帧）才吐第一张图**：画面静止时服务端只给二十来帧 → **永远黑屏**；编码器一重建就再攒一批 → **隔几秒卡一下然后一次性追平** |
 | **macOS / iOS** | VideoToolbox（`VTDecompressionSession`） | **`kVTDecompressionPropertyKey_RealTime = true`**。**不要**顺手设 `kVTDecompressionPropertyKey_MaximizePowerEfficiency`——头文件原文写着"两者同设是未定义行为"，而它默认就是 false，不设才对（那条"建议同设"的旧结论与头文件冲突，已纠正）。 | **实测（iOS 2026-10-02）：Apple 侧没有 Windows 那种缓冲**——`RealTime` 默认就是 true，探针跑 true / false / 完全不设三种都是 90/90 帧全解（`tools/run_vt_replay_probe.sh`）。但仍要显式设一次并记返回码，日志里能自证 |
-| Android（已实现） | `MediaCodec` | 已经是实时模式（SurfaceProducer），**无需改** | — |
+| Android（已实现） | `MediaCodec` | **显式设 `KEY_LOW_LATENCY=1`（API 30+）、`KEY_PRIORITY=0`、`KEY_OPERATING_RATE=Short.MAX_VALUE`**，并把"设了什么 + 解码器回报的输入格式"写进日志 | **实测（2026-10-08 真机 Android 16）：不设也不会像 Windows 那样憋**（首秒就解出 45 帧、`已解出/已喂入 = 480/482`）——设上是为了不依赖机型默认值。它还是三端里**唯一能让编解码器自己回报**的：日志里能看到 `low-latency=1, priority=0, operating-rate=32767`（见 §11） |
 
 **判断方法（不依赖肉眼）**：看心跳里 `已发布 / 已喂入` 的比例。
 **`已发布 ≪ 已喂入` 就是"解码器在憋"**（Windows 上实测：不设开关 8/43、设了 42/43）。
@@ -562,29 +562,27 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 2. 画面（`_VideoStage`）**完全没有避让** → 缺口直接压在画面左上角
    → 就是"灵动岛挡住了"（截图里搜素框左边被切掉一块）。
 
-**修法**（两处 + 一个开关）：
+**修法**（两处 + 一个**已删除**的开关）：
 
 - **快捷栏**：横屏（竖排栏）改成 `SafeArea(right: false, left: false, bottom: false)`
   —— 按钮竖排在**右边缘、竖直居中**；灵动岛只占顶部 ~37 点，够不到按钮
   （缺口换到右侧也一样够不到）。竖屏保留底部安全区。**栏宽 114 → 52**。
 - **画面**：横屏时按 `MediaQuery.paddingOf(context)` 的 `left/right` **避让**
-  （`Padding` 包住整个 Stack，顶栏浮层与常驻小圆钮一起避让，免得圆钮压在缺口下点不着）。
+  （`Padding` 包住整个 Stack，顶栏浮层一起避让）。
   这一步**不损失画面尺寸**：避让后画面区 704x402 ≈ 1.75:1，与 16:9 几乎相同，
   于是 16:9 画面正好铺满、连黑边都没了（避让前反而要留 22pt 黑边）。
-- **开关** `PlayerViewModel.fillCutout`（默认 **false** = 避让）：
-  在"更多"面板里「画面填满到灵动岛」；打开 = 一点不让，铺满整块屏幕（缺口可能遮一角）。
+- **没有开关，一律避让**（2026-10-08 按用户要求把「画面填满到灵动岛」删掉了：
+  打开它只是把那 59 点空白换回来、缺口还可能压住内容，**没有意义**）。
   只用 `MediaQuery.paddingOf`（**不是** `viewPaddingOf`：与 `SafeArea` 同源，
   测试里的 `FakeViewPadding` 设的也是 `padding`，用错那个在测试里恒为 0）。
 
 **回归测试**（`player_page_test.dart`，新增 `landscapePhoneWithCutout`：
 874x402 @3 + `FakeViewPadding(left: 59*3, right: 59*3, bottom: 21*3)`）：
 
-- 默认：`Texture.left >= 59`（缺口压不到画面）+ 画面仍撑满高度 + 返回按钮离右边缘 < 30pt
+- `Texture.left >= 59`（缺口压不到画面）+ 画面仍撑满高度 + 返回按钮离右边缘 < 30pt
   （那 59pt 空带没了）；
-- 打开开关：`Texture.left < 59`（确实铺到边）；
-- 面板里开关存在、默认关、能打开、切完不出异常。
-  ⚠️ 切换会触发 350ms 视口防抖，测试里要把计时器 pump 完，否则报
-  `A Timer is still pending`。
+- **两个开关都已被删掉**（"画面填满到灵动岛" / "连接后自动唤醒设备"）：面板里 `findsNothing`，
+  横屏一律避让、没有开关。
 
 ### 9.2 ★ 画面适配与横屏布局（2026-10-02，用户看到横屏截图后要求改）
 
@@ -618,8 +616,39 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 `videoRect.height > 屏幕高度 * 0.9`。
 
 **顶栏为什么不是"点画面唤出"**：画面上的点击是**要发给被控设备的**，
-同一个手势不能既操作远端又开关本地 UI。所以留了一个**常驻半透明小圆钮**（左上角）唤出，
-顶栏本身是浮层（盖在画面上），收起后一点高度都不占。
+同一个手势不能既操作远端又开关本地 UI。**2026-10-08 改法**：唤出入口放在**竖排快捷栏**里
+（多一个「顶栏」按钮）——它完全在画面区之外。此前那个**浮在画面左上角的半透明小圆钮**
+已经删掉：它会**抢走它下面那一片区域的点击**（用户反馈"挡住投流内容、某些区域点不了"）。
+**教训**：画面区里不要放任何本地 UI 浮层，哪怕只有几十点 —— 那几十点在设备侧就是几十个像素
+**永远点不到**（除非用户先把它藏起来）。
+
+#### ★ "填满屏幕"（2026-10-08 用户要求，替代原来的"铺满屏幕"开关）
+
+用户原话：**"右上角的日志放到更多；原本的日志按钮变为填满屏幕，然后隐藏上下边栏；
+在填满屏幕状态下屏幕左滑一下退出；更多操作的填满屏幕操作可以移除"**。逐条落地：
+
+- **日志**从右上角（竖屏 AppBar 的 action / 横屏顶栏的图标）搬进「更多」面板
+  （`_MoreAction.showLogs`，点一下切换）；
+- 那个位置改成 **`Icons.fullscreen` 的「填满屏幕」**：进入后
+  **上下边栏一律不渲染**（竖屏 AppBar + 底部快捷栏；横屏顶栏浮层 + 竖排快捷栏 + 日志面板），
+  把整块屏幕交给画面；**画面走 fit（`VideoFitMode.contain`）—— 按横竖屏算出来的最大尺寸，
+  绝不超出屏幕、绝不裁切**。竖屏"宽度顶满、上下留黑"、横屏"高度顶满、左右留黑"，
+  这是 16:9 与屏幕比例不一致的必然结果。
+  ⚠️ **用户 2026-10-08 明确否掉了 cover**（第一版就是 cover → "填满到超出屏幕了"）：
+  用 cover 去填满等于裁掉内容，那不是填满。
+  状态在 `PlayerViewModel.fillScreen`（进入时记住原来的显示方式，退出还原，不污染用户偏好）；
+- **退出方式：左滑**（进入时给一条 2.2 秒的提示，`IgnorePointer` 包着、不吃点击）。
+  **刻意不留退出按钮** —— 画面里的按钮会吃点击，这正是前两条反馈的根因。
+  ⚠️ **★ 踩到系统手势（2026-10-08 用户实测"左滑只会返回上一层"）**：
+  **从屏幕左边缘起手的那一滑是 Android 的系统返回手势**，会被系统直接吃掉 ——
+  页内的 `_FillScreenExit`（累计 dx ≤ −56 或甩速 ≤ −300 px/s）**根本收不到指针事件**，
+  于是用户看到的是"退回设备列表"。修法：填满状态下用
+  **`PopScope(canPop: false)`** 把系统返回拦下来，`onPopInvokedWithResult` 里改成
+  `setFillScreen(false)` —— 于是三条路（系统边滑 / 系统返回键 / 页内非边缘左滑）**同一个结果**，
+  而且**页面不会被 pop 掉**。回归测试直接调 `tester.binding.handlePopRoute()` 钉住这条。
+- **已知取舍**：画面上的输入层是 `Listener`（不参与手势竞技场），所以**页内那一滑**
+  **既会退出填满、也会照常发给设备**；左边缘那一滑走的是系统返回，不会发给设备。
+- 「更多」里的**「铺满屏幕」开关已删除**（同一条路已由「填满屏幕」承担）。
 
 **B. "铺满"显示模式（`VideoFitMode`：contain / cover）**
 
@@ -629,7 +658,10 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
   以前渲染是手写 `AspectRatio`、换算是另一份公式，**一旦加 cover 就会两边不一致、点哪都偏**。
 - cover 的几何：`scale` 取**较大**的比例、`offsetX/Y` 变**负数**（画面比控件大），
   `contains()` 恒真（被裁掉的部分只是"点不到"，不是"点位非法"）。
-- 入口两处：横屏顶栏里的图标按钮 + **"更多"面板里的"铺满屏幕"开关**（竖屏时唯一入口）。
+- 入口一处（2026-10-08 起）：右上角的「**填满屏幕**」按钮（竖屏在 AppBar、横屏在顶栏浮层）。
+  它就是**隐藏上下边栏 + fit（contain）**；「更多」面板里那个"铺满屏幕"开关已删除。
+  **cover 现在没有任何 UI 入口**（用户否掉了它）——`VideoFitMode` 的两个值仍保留，
+  由 `video_viewport_test.dart` / `player_page_test.dart` 直接调用来守着那套几何换算。
 
 #### ★ 溢出：真机截图里那条 `BOTTOM OVERFLOWED BY 3.9 PIXELS`
 
@@ -726,9 +758,37 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
 - **一条 WS 消息 = 一帧 Annex-B**（实测）。只含 SPS/PPS 等非 VCL NAL 的那条按
   `BUFFER_FLAG_CODEC_CONFIG` 喂；含 1/5 号 NAL 的按普通输入喂。
 - 解码跑在**独立 HandlerThread**（MediaCodec 异步回调），不阻塞 platform thread；
-  等待队列超过 60 帧就丢最旧的帧，避免解码跟不上时内存无界增长。
-- 真实分辨率以 `onOutputFormatChanged` 为准（投流中可能变化）→ `SurfaceProducer.setSize`
-  + 反向通知 Dart（`onSizeChanged`），UI 用 `AspectRatio` 跟着调。
+  等待队列超过 **8** 帧就丢最旧的帧（**60 → 8**，2026-10-08）。
+  **为什么改**：60 帧在 30fps 下就是约 2 秒排队延迟，解码跟不上时延迟会滚雪球
+  （Windows 上就是为此把 60 降到 4，见 §12.8 原因②）。取 8 而不是 4 是因为这一端解码器
+  直写 GPU 纹理，实测队列平常恒为 0，留一点余量吸收调度抖动。**丢帧会断 H.264 参考链**
+  （花到下一个 IDR 为止），所以这个值不能更小，且必须进心跳。
+- **★ 显式设低延迟三键**（2026-10-08，对齐 §1.2 的对照表）：
+  `KEY_PRIORITY=0`（realtime）+ `KEY_OPERATING_RATE=Short.MAX_VALUE`（API 23+，
+  "按最高吞吐跑、别为省电降频"）+ **`KEY_LOW_LATENCY=1`（API 30+）** ——
+  就是 Apple 的 `kVTDecompressionPropertyKey_RealTime` / Windows 的 `MF_LOW_LATENCY`
+  在这一端的对应物。启动日志把"设了什么"和**解码器自己回报的输入格式**一起打出来，
+  实测回报是 `{operating-rate=32767, low-latency=1, priority=0, mime=video/avc, width=1280, height=720, …}`
+  —— 三端里**只有这一端能让编解码器自己确认**，将来"画面慢"时第一件事就是看这行。
+- **优先挑硬件解码器**：API 29+ 能拿到 `MediaCodecInfo.isHardwareAccelerated` 就按它挑
+  （`MediaCodec.createByCodecName`），选中名字进日志与心跳；**拿不到判断依据的旧系统不猜**，
+  回落到 `createDecoderByType`。实测选中 `c2.qti.avc.decoder`（硬解=是）。
+- **★ 每秒心跳**（2026-10-08）：口径与 Windows / Apple **逐字对齐** ——
+  `收到 / 已喂入 / 已解出 / 丢弃 / 队列深度 / 帧间隔 / 解码失败 / 尺寸 / 解码器 / 低延迟`，
+  外加"距上一帧超过 5 秒"的 WARNING。**这一端此前完全没有诊断**：
+  于是"`已解出 ≪ 已喂入` = 解码器在憋"这条判据在 Android 上没法用（§1.2 的判断方法）。
+  实现细节：计数走 `AtomicInteger`（platform thread 与解码线程都会写），
+  心跳跑在解码线程的 Handler 上、`release()` 里 `removeCallbacks`。
+- **实机实测（2026-10-08，Android 16 / 骁龙机型，Debug APK）**：
+  44 秒连续投流 `收到 1087 / 已喂入 1087 / 已解出 1086 / 丢弃 0 / 队列深度 0 / 解码失败 0`，
+  帧间隔 1~123ms（**由服务端给帧节奏决定**：这一场约 19~28 帧/s，只有画面变化才发帧），
+  编码尺寸 1280x720 → **1248x704**（§12.7 的 16 宏块对齐在设备侧生效）。
+  Dart 侧同一时间的 `NativeVideoDecoder` 吞吐是 `发起 +27 / 完成 +26 / 失败 0 / 在途峰值 2`
+  —— 平台通道没有积压。**并已 `adb exec-out screencap` 截图确认画面上屏**
+  （只信"已解出 N 帧"就会重犯 §12.8 教训①）。
+- 真实分辨率以 `onOutputFormatChanged` 为准（投流中可能变化）→ **只通知 Dart（`onSizeChanged`）
+  让 UI 用 `AspectRatio` 跟着调，绝不 `SurfaceProducer.setSize`**（2026-10-08 修掉的那个
+  "跑一会就冻屏"就是这个调用引出来的，完整根因见 **§11.1**）。
 - **Dart 侧接口**：`NativeVideoDecoder`（`create/pushFrame/release` + `sizeChanges`；
   类名从 `AndroidVideoDecoder` 改名为平台无关，Android / Windows 共用同一份契约），
   `PlayerViewModel.textureId/videoSize/decoderError/retryDecoder`，
@@ -741,16 +801,174 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
     （service 内对相同边界去重，避免旋转动画期间反复刷参数）；
   - 网页路径：页面里注入的脚本挂了 `resize`/`orientationchange`（防抖 350ms）重新点 `Fit`，
     Dart 侧再监听 `didChangeMetrics` 兜一次底。
-- **底部快捷栏只放高频入口**：返回 / 主页 / 最近 / 更多（4 个），
-  音量、电源、旋转、面板、断开都收进"更多"底部面板。
+- **底部快捷栏只放高频入口**：返回 / 主页 / 最近 / **旋转本机** / 更多（横屏再加一个「顶栏」）。
+  **「旋转本机」（2026-10-08 用户要求）转的是这个 App 自己的朝向**（竖屏 ⇄ 横屏，
+  `SystemChrome.setPreferredOrientations`）——**不是**被控设备那条命令
+  （那条在「更多」里叫「旋转设备屏幕」）。两件事同名不同物，别搞混：
+  用户就是要"旋转当前手机的 app 的那种旋转"（竖屏下画面只有中间一条，转横屏能大不少）。
+  Android 清单里**没有**锁死 `screenOrientation`，且 `configChanges` 带 `orientation`，
+  所以运行时改朝向不会重建 Activity ✓。测试用 `flutter/platform` 上的
+  `SystemChrome.setPreferredOrientations` 调用钉住它。
+  音量、电源、**旋转设备屏幕**、下拉面板、断开、日志都收进"更多"底部面板。
   早期版本把 8 个按钮平铺在底部，既挤画面又在横屏下容易溢出；
   面板本身用"紧凑按钮墙 + 可滚动"，因为投流页默认横屏、可用高度很小。
-- 验证：`flutter build apk --debug` 通过（Kotlin 编译过），
+- 验证：`flutter build apk --debug` 通过（Kotlin 编译过）——**离线构建的两个前置见 §3.4**；
   `test/feature/stream/stream_session_service_test.dart` 用真实报文夹具覆盖了
   "初始头只回一次参数 / 帧转发 / 控制消息走同一连接 / 视口边界去重"等管线行为，
   `test/feature/stream/player_page_test.dart` 覆盖了快捷栏布局、更多面板、
-  原生解码就绪（渲染 Texture + 帧被喂进去）与创建失败（可读错误 + 重试）两条分支；
-  **实机解码效果需要在设备上跑一次确认**（本机没有连设备）。
+  原生解码就绪（渲染 Texture + 帧被喂进去）与创建失败（可读错误 + 重试）两条分支。
+  **2026-10-08 已补上真机验证**（Android 16 真机、Debug APK、自动投流）：
+  心跳数据见上面"实机实测"一条，画面经 `adb exec-out screencap` 截图确认；
+  这一轮还顺手验证了两件与 Android 无关、但只在真机上才看得见的事：
+  ① **drift v1→v2 迁移**在真实设备上跑通（老版本装的库少了 `password` 列，升级后自动补上）；
+  ② **Dart 侧日志落盘**在 Android 上同样可用（`files/ws_scrcpy_client_app.log`）。
+
+---
+
+### 11.1 ★★ Android"跑一会就冻屏、点哪都不动"：**输出 Surface 被引擎剪掉，编解码器还在往里写**（已修）
+
+**用户描述（2026-10-08）**："很卡，几乎点不了" →"延迟会不断累加" →
+"只要待一会没多久屏幕就点不了卡死，100% 重现"。
+
+**现象（全部有日志/截图证据）**：
+
+- **解码侧完全正常**：311 条心跳里 `已喂入 − 已解出` 恒为 1~2、`队列深度` 0~1、`丢弃 0`、
+  `每秒 25~28 帧`；Dart 侧 874 条采样 `在途峰值 2~3、当前 0~1、失败 0`。
+- **服务端在发真实内容**：`WS 帧吞吐/s` 的**每帧平均 15~16 KB**（空帧/重复帧只会有几十~几百字节）。
+- **但屏幕是冻的**：同一时刻间隔 4 秒的两张 `screencap`，视频带（y=1066..1783）
+  **逐字节相同（变化像素 0、最大差 0）**；而半小时前同样两张图差 **78.7% 的像素**。
+- **Flutter 自己的 UI 照常重绘**（点"更多"两帧差 55.84）→ 所以不是"整个 app 卡死"。
+
+**根因（反汇编 `flutter_embedding_debug` 里的 `FlutterRenderer$ImageReaderSurfaceProducer`
+逐条确认，不是猜）**：
+
+```java
+// SurfaceProducer.setSize(w,h)：尺寸与 requested 不同时
+createNewReader = true;                    // ← 下次 getSurface() 会建**新**的 ImageReader
+// getActiveReader()：createNewReader → 建新 reader、清标志、把旧的留在 imageReaderQueue 里
+// canPrune()：图片队列空 **且** 不是当前 active reader → 可剪
+// close()：closed = true; reader.close(); imageQueue.clear()      ← 不可逆
+// PerImageReader.queueImage(image)：if (closed) return null;
+// ImageReaderSurfaceProducer.onImage(...)：
+PerImage queued = r.queueImage(image);
+if (queued == null) return;                 // ← 关键：返回 null 就**不调用** scheduleEngineFrame()
+this$0.scheduleEngineFrame();               // ← 只有走到这里，引擎才会为"有新帧"重绘
+```
+
+链条：`create()` 里先把 Surface（reader A）交给编解码器 → 随后 `applySize()` 调
+`setSize()` 把 `createNewReader` 置位 → **引擎下一次取 active reader 时建了 reader B，A 不再 active**
+→ A 的图片队列一空就被 `prune` + `close()` → **而编解码器还在往 A 写** → 之后每一帧
+`queueImage` 都返回 null → **`scheduleEngineFrame()` 再也不被调用** → 引擎不再因新帧重绘 →
+**画面永久冻结，而所有客户端计数器都是绿的**。
+
+**"待一会才发作"**：剪枝发生在引擎**之后某次**取帧/取 active reader 时，不是立刻。
+
+**试过但没用的一条**（记下来省得再走）：`MediaCodec.setOutputSurface(新 Surface)` ——
+调用成功、日志也打了 `输出 Surface 已切换（setOutputSurface）`，但画面依旧冻着；
+说明这颗 `c2.qti.avc.decoder` 并没有真的把输出切过去。**所以不要指望"换 Surface"这条路。**
+
+**修法**：**只在建解码器之前定一次尺寸，之后永不换 Surface**（`applySize()` 只做
+"记录尺寸 + 通知 Dart"，并记一条 `尺寸变化 N 次（不换 Surface）` 进心跳）。
+代价（已知）：真实分辨率与初始尺寸不一致时由编解码器缩放进这块缓冲（实测 1248x704 → 1280x720
+的 1280x720 初值，差 2.6%，肉眼无感）；**换设备方向导致分辨率大幅变化时会有缩放/letterbox，
+但不会冻屏**。要彻底支持那种情况，正确做法是**重建整个 SurfaceProducer 并换纹理 id**
+（Dart 侧要能接受 `textureId` 变化）——列为后续项，**不要再回到 `setSize`**。
+
+**复现/验收方法（不需要肉眼，可复制）**——这一端唯一能看见"上屏"的仪器：
+
+```powershell
+# 间隔 4 秒截两张，比"视频带"里变化了多少像素（视频带位置见日志里 画面诊断 的"绘制 … 偏移 …"）
+adb exec-out screencap -p > a.png ; Start-Sleep 4 ; adb exec-out screencap -p > b.png
+# 用 Python/Pillow 裁剪视频带（本机 jpeg 设备是 y≈1066..1783）后统计
+#   d = ImageChops.difference(a.crop(box), b.crop(box))
+#   sum(1 for p in d.getdata() if p > 8)
+```
+
+| | 视频带 4 秒内变化 |
+|---|---|
+| **修之前**（同一套测试，21:57） | **0 个像素**（逐字节相同） |
+| **修之后** | **79,396 个像素（8.71%），最大差 185** |
+
+**教训**：① **平台 API 里"改一个属性就把资源本体换掉"的（`SurfaceProducer.setSize` 换 Surface）
+要当成单向门**——换掉之后**别人还在用旧的**，而且对方可能"静默地什么都不做"；
+② **`已解出 N 帧` ≠ 上屏**，这条在 Windows（§12.8 教训①）和 Android 上各栽了一次：
+客户端必须有一条**自己的上屏度量**，否则解码全绿也会冻屏；
+③ 排"跑一会才坏"的问题，**先找一次性/不可逆的状态**（`closed = true`、剪枝、句柄失效），
+它们比"慢慢泄漏"更符合"100% 重现且和交互无关"的签名。
+
+---
+
+### 11.2 ★★ Android"第一次进投流页必黑、退出再进就好"：**我们把首帧丢了**（已修，2026-10-08）
+
+**用户描述**："app 初始化进去后，点击投流黑屏，退出再进后就正常，100% 复现"，并强调
+**"其他 4 个端都没这个问题，不可能是服务端"** —— 这条判断是对的，两处根因都在我们这侧。
+
+**现场证据（用户停在黑屏时抓的，可复制）**：
+
+| 观测 | 值 |
+|---|---|
+| 原生心跳 | `收到 10，已喂入 10，**已解出 0**，丢弃 0，队列深度 0，帧间隔 —，解码失败 0，尺寸 1280x720，**尺寸变化 0 次**` |
+| 5 秒间隔的两张 `screencap` | 视频带（y400–2400）亮度 **0.0**、整屏变化 **0 像素**（本地 UI 也没动） |
+| 那条连接 | `WS 收到 +10（累计 10 帧，**0 字节**）` |
+
+`已解出 0` + `尺寸变化 0 次` 是**"解码器从没拿到可解样本"**的铁证（真实尺寸只在解出第一帧
+之后由 `onOutputFormatChanged` 上报）。
+
+#### 根因 ①：解码器是"后建"的，而**补喂订阅前那段的代码只在 web 上执行**
+
+服务端在连接建立后立刻推「SPS/PPS + 首个 IDR」（常与初始头同一个事件循环），
+而我们的解码器要先拿到 displayInfo 才建 —— 这段在**广播流没有监听者时直接丢**。
+丢了参数集 + IDR 之后只剩 P 帧：**一帧也解不出来，而且不报错**。
+
+- **为什么只在 Android（和为什么"退出再进就好"）**：冷启动时 `MediaCodec` 的
+  `create/configure/start` + `createSurfaceProducer` 慢（logcat 里一整套
+  `Codec2Client` / `CCodecBufferChannel` / `setOutputSurface` 初始化），
+  首发那段必然落在订阅之前；第二次进页面编解码器已经热了、几毫秒返回，正好接住 → 100% 复现。
+- **修法**：`PlayerViewModel` 里那句 `if (_isWeb)` **删掉，四端都补喂**
+  （`replayFramesForNewDecoder()` 早就存在，注释还断言"原生三端不依赖这个"——被日志推翻）。
+  日志里能看到 `补喂后建解码器：N 条（参数集=… IDR+后续=…）`。
+- **回归测试**：`player_page_test.dart` 的
+  "★ 把'订阅之前到达'的参数集 + IDR 补喂给后建的解码器" **不再传 `isWeb: true`**，挡的就是原生这条路。
+
+#### 根因 ②：视口**补发**那条路把原始视口当边界交出去（竖屏手机上是畸形值）
+
+`StreamSessionService.applyViewportBounds` 原来这样写：去重比的是收敛后的 `effective`，
+但交给 `_sendVideoSettings` 的是**原始视口** `bounds`。竖屏手机上原始视口是
+`363x800 逻辑 → 1264x2256` —— **比显示（1280x720）高 3 倍、而且是竖屏比例**：
+
+```
+视口诊断：… 真正下发编码参数 1 条，控件 363x800 逻辑@3.50x，生效编码边界 1264x2256
+```
+
+首发那条走的是收敛过的 `1264x704`（与设备同比例 ✓），**补发这条没有**。
+桌面端/浏览器给出的视口都是横的（比例与设备一致），所以只有手机竖屏踩到。
+
+- **修法**：补发也传**归一化后的边界**，并新增"**线值自证**"日志 —— 每次下发都把
+  "请求值 / 真正写进报文的 bounds / 设备原生 / 档位 / 报文字节数"打出来：
+
+  ```
+  下发视频参数（线值）：bounds=1264x704（请求 1264x2256，设备原生 1280x720，档位=maximum），
+  bitrate=7340032 maxFps=60 iFrameInterval=10，报文 30 字节
+  ```
+
+  以后判定"我们的请求是不是错的"只需要看这一行，不必从"视口诊断"的间接数字猜。
+
+#### 顺带补的两条诊断（这类故障必须自己喊出来）
+
+`ScrcpyVideoDecoder.kt`：
+
+- **空载荷不再当样本喂**（`pushFrame` 里 `bytes.isEmpty()` 直接计数返回）：那次黑屏就是
+  10 条 0 字节被喂成"收到 10"，计数器虚高掩盖了"其实一个样本都没有"；心跳现在多一项
+  `空载荷 N（不是样本，未喂）`；
+- 新增 WARNING：**"已喂入 N 帧但一帧都没解出来"**（`NO_OUTPUT_WARNING_MS = 3s`）——
+  这正是"没拿到 SPS/PPS + IDR"的签名，而它的表现是**日志全绿 + 屏幕全黑**，
+  没有这条告警就只能靠人肉比对截图才能发现。
+
+**教训**：① **`已解出 0` 要看**——解码侧"收到/已喂入"绿着不代表拿到了可解样本；
+② **平台分支（`if (_isWeb)`）是 bug 的温床**：同一个时序问题在原生上更严重（冷启动更慢），
+写"只有 web 需要"时必须带上实测依据，别靠"原生不依赖"这种断言；
+③ **发给设备的东西要有"线值"日志**：中间隔着归一化/去重两层时，
+"我们看到的值"和"线路上跑的值"完全可能不是一回事。
 
 ---
 
@@ -871,9 +1089,9 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
   `dart analyze lib test tools` 无问题；`flutter test` 全过（**206 通过 / 1 skip**，
   其中 `native_video_decoder_test.dart` 的 9 条覆盖"回执/拉取尺寸 + 尺寸去重 + 老契约兼容"，
   `player_page_test.dart` 有"Windows 且解码器就绪 → 渲染 Texture + 帧被喂进去"
-  与"'更多'面板里唤醒开关默认关且能打开"的断言，
+  与"「更多」面板里不再有那两个被删掉的开关"的断言，
   `stream_session_service_test.dart` 覆盖"首发只发一条且带 UI 最终尺寸 / 回显服务端值 /
-  UI 尺寸晚到的兜底路径 / 未连接时上报尺寸不算失败 / 唤醒默认关且只发一次"）。
+  UI 尺寸晚到的兜底路径 / 未连接时上报尺寸不算失败 / **整条连接里没有任何 KEYCODE_WAKEUP**"）。
   **本机没有真实设备与 ws-scrcpy 服务端**：越界与内存安全已用 ASan 自测覆盖，
   但画面/色彩/性能仍需真机复验；首跑重点看：是否有画面、红蓝是否颠倒（RGBA 字节序）、
   旋转后分辨率是否跟着变、以及 CPU 占用。
@@ -1019,7 +1237,7 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
 **已修**（完整证据链见 `docs/windows-decoder-history.md`）：黑屏真因是**视频参数下发方式**——
 连发两条 `CHANGE_STREAM_PARAMETERS` + 不回显服务端给的 `VideoSettings`，服务端因此两次重建编码器
 且不会立刻给 IDR。修法：首发只发一条且带 UI 最终尺寸、逐字段回显服务端值（只覆盖 `bounds` 与
-`sendFrameMeta:false`）；自动唤醒默认关（它**不是**黑屏的正解）。
+`sendFrameMeta:false`）；**唤醒功能已整体删除**（2026-10-08：加它的前提是误判，见 `docs/windows-decoder-history.md`）。
 "非常卡"的归因已被 §12.7★修正 与 §12.8 推翻：不是换算，而是**像素路上 CPU 整帧搬运 + 队列延迟**。
 
 ### 12.6 `ProcessOutput 0x80004005` 洪水 + "270 帧只解出 1~2 帧"
