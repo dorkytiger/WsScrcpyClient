@@ -62,10 +62,61 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 ## 2. 注册 runner
 
-### 2.1 你已有的（Linux）
+### 2.1 Linux runner（`lingke`）：标签 = "**标签名 : 用哪个镜像跑**"
 
-`lingke` 已在线（标签 `docker`、`ubuntu-latest`，状态空闲），工作流里
-`runs-on: ubuntu-latest` 就是找它，**不需要动**。
+这台 runner 已在线，标签有 `docker` 与 `ubuntu-latest`（状态空闲），工作流里
+`runs-on: ubuntu-latest` 找的**就是它** —— 标签匹配没问题。
+真正决定"用什么环境跑"的是 `config.yml` 里标签**冒号右边**那半截：
+
+```yaml
+runner:
+  labels:
+    # 标签名 : 执行方式（docker://镜像 或 host）
+    - "ubuntu-latest:docker://data.forgejo.org/oci/ubuntu:24.04"   # ← 右边是镜像
+```
+
+#### ★ 已经踩到的坑（2026-10-07）：默认标签指向的镜像拉不到
+
+Forgejo runner **13.2.0** 的默认标签指向 `data.forgejo.org/oci/ubuntu:24.04`，而那个引用
+**解析不了**，于是 job 在 **Set up job** 阶段就死掉：
+
+```
+Start image=data.forgejo.org/oci/ubuntu:24.04
+Error response from daemon: failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04":
+  data.forgejo.org/oci/ubuntu:24.04: not found
+```
+
+**它看起来像工作流报错，其实是 runner 的配置问题**：工作流里只有 `runs-on: ubuntu-latest`，
+镜像地址完全来自 runner 的 `config.yml`。改法 —— 在 **runner 那台机器**上改 `config.yml`
+的标签，然后重启 runner：
+
+```yaml
+runner:
+  labels:
+    # ① 用 Docker Hub 官方镜像（多数环境可用）
+    - "ubuntu-latest:docker://docker.io/library/ubuntu:24.04"
+    # ② 或换成这台机器拉得到的镜像源，例如国内镜像：
+    # - "ubuntu-latest:docker://docker.m.daocloud.io/library/ubuntu:24.04"
+    # ③ 或干脆不进容器、直接跑在宿主机上（宿主机要有 node，JS action 才跑得起来）：
+    # - "ubuntu-latest:host"
+```
+
+**先在 runner 机器上手动验一次，别等 CI 报错**：
+
+```bash
+docker pull docker.io/library/ubuntu:24.04     # 拉不动 = 网络到那个 registry 不通
+grep -A 6 labels <forgejo-runner 的 config.yml> # 看现在映射的是哪个镜像
+```
+
+> **`ubuntu:24.04` 里没有 Flutter 不影响**：工作流的 `subosito/flutter-action` 会自己下 SDK，
+> Android 那步的 JDK 也由 `actions/setup-java` 装。
+> 反过来，**镜像里必须有 `curl` / `git` / `tar` / `unzip`**（官方 ubuntu 镜像都自带），
+> 所以别用 `alpine` 这类极简镜像。
+> **web 那个 job 用 `zip`**，官方 ubuntu 镜像里也有（`zip -qr`）。
+
+> 另一种思路：如果 `docker` 这个标签映射的镜像是好的，把三个 Linux job 临时改成
+> `runs-on: docker` 即可先跑起来；或者给 runner 加一个 `host` 标签后用 `runs-on: host`。
+> 两者都要先在 runner 端确认映射有效。
 
 ### 2.2 新加一台 Windows runner（可选，为了 CI 也能出 Windows 包）
 
@@ -175,6 +226,7 @@ tools\build_release.cmd -SkipTests              # 跳过 analyze/test，赶紧�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | **runner 的"标签→镜像"映射**指向了拉不到的镜像 —— 不是工作流问题（工作流只写了 `runs-on: ubuntu-latest`） | 改 runner 的 `config.yml` 标签（见 §2.1）后重启 runner；先在 runner 上 `docker pull` 验一次 |
 | `windows` job 一直"等待中" | 没有标签为 `windows` 的 runner（现有 `lingke` 是 Linux/Docker） | 注册 Windows runner（§2.2），或先关掉它（别设 `WINDOWS_RUNNER` 变量），Windows 包用 `tools\build_release.cmd -Platform windows` |
 | 下载 action 失败 / `uses:` 解析不了 | runner 的 `DEFAULT_ACTIONS_URL` 指不到 GitHub 或代理不通 | 在 runner 的 `config.yml` 里设 `[actions] DEFAULT_ACTIONS_URL = https://github.com`（或把 action 从内网镜像取） |
 | `[nuget_shim] ERROR: WebView2 / WIL packages are missing` | 干净 checkout 没跑取包那步 | 工作流已含 `prepare_windows_deps.ps1 -Online`；若仍报错，看它上面一条下载是否被网络拦了 |
