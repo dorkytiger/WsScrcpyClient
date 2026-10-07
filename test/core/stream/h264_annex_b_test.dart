@@ -50,6 +50,50 @@ void main() {
     });
   });
 
+  group('H264AnnexB.sampleDataForDecoder（无 description 时喂给 WebCodecs 的样本）', () {
+    test('★ 参数集必须拼在关键帧前面（这正是 Chrome "Decoder failure" 的根因）', () {
+      // 服务端 WebCodecsPlayer 的做法：SPS+PPS+IDR 拼成一条 type:'key' 的 chunk。
+      // 只喂 IDR（不拼参数集）时解码器手里没有 SPS/PPS → 直接报 Decoder failure（用户实测）。
+      final sample = H264AnnexB.sampleDataForDecoder(
+        frame: idr,
+        parameterSets: parameterSets,
+      );
+      expect(sample.length, parameterSets.length + idr.length);
+      expect(
+        sample.sublist(0, parameterSets.length),
+        parameterSets,
+        reason: '参数集必须在最前面',
+      );
+      expect(sample.sublist(parameterSets.length), idr);
+      expect(H264AnnexB.avcCodecString(sample), 'avc1.42c029');
+    });
+
+    test('帧里已经带了参数集 → 原样返回（不重复拼）', () {
+      final withParams = Uint8List.fromList(<int>[...parameterSets, ...idr]);
+      expect(
+        H264AnnexB.sampleDataForDecoder(
+          frame: withParams,
+          parameterSets: parameterSets,
+        ),
+        same(withParams),
+      );
+    });
+
+    test('没有参数集 / 空参数集 → 原样返回', () {
+      expect(
+        H264AnnexB.sampleDataForDecoder(frame: idr),
+        same(idr),
+      );
+      expect(
+        H264AnnexB.sampleDataForDecoder(
+          frame: idr,
+          parameterSets: Uint8List(0),
+        ),
+        same(idr),
+      );
+    });
+  });
+
   group('H264AnnexB.avcCodecString', () {
     test('★ 真实 SPS（67 42 c0 29 …）→ avc1.42c029（Baseline 4.1）', () {
       // WebCodecs 的 VideoDecoderConfig.codec 要这个串；造错会被 configure 直接拒绝。

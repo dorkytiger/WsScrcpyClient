@@ -1797,7 +1797,40 @@ web 上更致命的是：**参数集（SPS+PPS）只发那一条**（实测夹�
 - web 解码器的日志接进**应用内日志面板**（`createVideoDecoder(onLog:)`），
   不必开 F12 就能把原文发出来。
 
-### 17.6 还没做的（下次接着做）
+### 17.6 ★ `WebCodecs 解码失败：Decoder failure`：**没有 description 就必须把参数集拼进样本**
+
+**现象**（用户实测截图）：错误提示出来了（说明 §17.5 那两条可观测性生效了），
+内容是 `WebCodecs 解码失败：Decoder failure`。
+
+**证据来自服务端自己的 `WebCodecsPlayer`**（`bundle.js` 原文，2026-10-07 拉下来读的）：
+
+```js
+// 它 configure 时也只给 {codec, optimizeForLatency:true}，同样**没有 description**
+t.prototype.decode = function (e) {
+  var r = 31 & e[4];                       // NAL 类型（它假定 4 字节起始码）
+  if (r === NAL.SPS) { … this.decoder.configure({codec: o, optimizeForLatency: !0});
+                       this.bufferedSPS = !0; this.addToBuffer(e); return; }   // ← 只 configure，不当样本
+  if (r === NAL.PPS) { this.bufferedPPS = !0; this.addToBuffer(e); return; }    // ← 攒起来
+  …
+  this.hadIDR = this.hadIDR || i;
+  if (u && this.decoder.state === 'configured' && this.hadIDR) {
+    this.decoder.decode(new EncodedVideoChunk({type:'key', timestamp:0, data: u.buffer}));  // ← SPS+PPS+IDR 拼成一条
+  }
+};
+```
+
+**根因**：不传 `description` 就没有**带外**参数集，SPS/PPS 必须**跟着片数据一起**喂。
+我们当时把"纯参数集那条消息"只用来 configure、然后单独喂 IDR → Chrome 手里没有 SPS/PPS
+→ `Decoder failure`。
+
+**修法**（`H264AnnexB.sampleDataForDecoder` + web 解码器）：
+- 关键帧样本前面拼上最近一条参数集（帧里已经带了就原样返回，不重复）；
+- 见过 IDR 之前不喂 chunk（P 帧没有参考帧，喂了只会报错）——与服务端 `hadIDR` 门槛一致。
+
+**回归测试**：`h264_annex_b_test.dart` → `★ 参数集必须拼在关键帧前面…`（含"帧里已带参数集
+→ 不重复拼"、"没有参数集 → 原样返回"）。**这一条是纯函数 + 真实夹具，所以离线可验证。**
+
+### 17.7 还没做的（下次接着做）
 
 - **不跟随设备分辨率变化重建解码器**：web 这边 `configure` 一旦定下 codec 就不重配；
   设备旋转导致 SPS 变化（例如 1200x672 → 672x1200）时，Chrome 多数情况下能靠帧内

@@ -553,7 +553,11 @@ class _VideoPlaceholder extends StatelessWidget {
                   ),
                   const SizedBox(height: AppSpacing.md),
                   Text(
-                    snapshot.hasVideo ? '已收到视频数据（M2 接入解码后在此渲染）' : '已连接，等待视频数据',
+                    // 文案要跟着实现走：解码已经全平台都有了（Linux 除外），
+                    // 所以这里说的是"正在解码/还没轮到渲染"，而不是"还没实现"。
+                    snapshot.hasVideo
+                        ? '已收到视频数据，正在解码…'
+                        : '已连接，等待视频数据',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.titleMedium?.copyWith(
                       color: theme.colorScheme.onInverseSurface,

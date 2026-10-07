@@ -55,6 +55,17 @@ class WebCodecsVideoDecoder extends VideoDecoder {
   VideoViewport? _viewport;
   VideoSize? _lastSize;
   String? _codec;
+
+  /// 最近一条**纯参数集**消息（Annex-B 的 SPS+PPS 原始字节）。
+  ///
+  /// 不传 `description` 时解码器手里没有带外参数集，必须把它拼到关键帧样本前面
+  /// （见 [H264AnnexB.sampleDataForDecoder]；服务端的 WebCodecsPlayer 也是这么做的）。
+  Uint8List? _parameterSets;
+
+  /// 见过 IDR 才开始喂 chunk：在那之前只有 P 帧，喂了也没有参考帧
+  /// （服务端 WebCodecsPlayer 里的 `hadIDR` 是同一个意思）。
+  bool _sawIdr = false;
+
   bool _configured = false;
   bool _hasCanvas = false;
   int _frameIndex = 0;
@@ -66,6 +77,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
   /// 万一上层来不及订阅，下一次 [pushFrame] 还能把它带回去。
   String? _pendingError;
   int _droppedUnconfigured = 0;
+  int _droppedBeforeIdr = 0;
 
   @override
   Stream<VideoSize> get sizeChanges => _sizeChanges.stream;
@@ -104,6 +116,8 @@ class WebCodecsVideoDecoder extends VideoDecoder {
     }
     _configured = false;
     _codec = null;
+    _parameterSets = null;
+    _sawIdr = false;
     _frameIndex = 0;
     _decodedCount = 0;
     _pendingError = null;
@@ -121,6 +135,11 @@ class WebCodecsVideoDecoder extends VideoDecoder {
     if (pending != null) {
       _pendingError = null;
       return failureVoid(RemoteException(message: 'WebCodecs 解码失败：$pending'));
+    }
+
+    // 记住参数集：后面每一条关键帧样本都要把它拼在前面（我们没传 description）。
+    if (H264AnnexB.hasParameterSets(frame)) {
+      _parameterSets = frame;
     }
 
     // 第一条带 SPS 的消息决定 codec 串；在那之前没什么可做的（scrcpy 开头就先发参数集）。
@@ -158,6 +177,24 @@ class WebCodecsVideoDecoder extends VideoDecoder {
     }
 
     final isKey = units.any((H264NalUnit unit) => unit.type == 5);
+    if (!_sawIdr && !isKey) {
+      // 还没见过 IDR：这些 P 帧没有参考帧，喂了只会报错（与服务端 hadIDR 的门槛一致）。
+      _droppedBeforeIdr++;
+      if (_droppedBeforeIdr == 1 || _droppedBeforeIdr % 60 == 0) {
+        _log('WARNING 还没收到 IDR，已丢弃 $_droppedBeforeIdr 条 P 帧（没有参考帧，喂了也解不出来）');
+      }
+      return successVoid();
+    }
+    if (isKey) {
+      _sawIdr = true;
+    }
+
+    // ★ 没有 description → 参数集必须跟片数据一起喂（关键帧拼 SPS+PPS，这正是
+    // "Decoder failure" 的根因：只喂 IDR、解码器手里没有参数集）。
+    final sample = H264AnnexB.sampleDataForDecoder(
+      frame: frame,
+      parameterSets: isKey ? _parameterSets : null,
+    );
     final timestamp = _frameIndex * _frameStepMicros;
     _frameIndex++;
     try {
@@ -166,7 +203,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
           web.EncodedVideoChunkInit(
             type: isKey ? 'key' : 'delta',
             timestamp: timestamp,
-            data: frame.toJS,
+            data: sample.toJS,
           ),
         ),
       );

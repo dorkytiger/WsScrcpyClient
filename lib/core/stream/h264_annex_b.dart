@@ -121,6 +121,31 @@ class H264AnnexB {
     return 'avc1.${_hex2(rbsp[0])}${_hex2(rbsp[1])}${_hex2(rbsp[2])}';
   }
 
+  /// 组装一条"喂给**没有 `description`** 的 WebCodecs 解码器"的关键帧样本：
+  /// 把参数集（SPS+PPS）拼在片数据前面。
+  ///
+  /// **为什么必须拼**（2026-10-07 用户实测 `WebCodecs 解码失败：Decoder failure`）：
+  /// 我们不传 `VideoDecoderConfig.description`（那样输入按 Annex-B 解释、省掉 AVCC 重封装），
+  /// 但代价是**解码器没有任何带外参数集**——SPS/PPS 必须**跟着片数据一起**喂进去。
+  /// 服务端自己的 `WebCodecsPlayer` 就是这么干的（它把 SPS+PPS+IDR 拼成一条 `type:'key'` 的 chunk），
+  /// 而"纯参数集那条消息"它只用来 configure，不当样本喂。
+  ///
+  /// [frame] 里已经带了参数集时原样返回，避免重复（H.264 允许带内重复，但没必要）。
+  static Uint8List sampleDataForDecoder({
+    required Uint8List frame,
+    Uint8List? parameterSets,
+  }) {
+    if (parameterSets == null ||
+        parameterSets.isEmpty ||
+        hasParameterSets(frame)) {
+      return frame;
+    }
+    final out = Uint8List(parameterSets.length + frame.length);
+    out.setRange(0, parameterSets.length, parameterSets);
+    out.setRange(parameterSets.length, out.length, frame);
+    return out;
+  }
+
   /// 去掉防竞争字节：码流里 `00 00 03` 是插入的，解析 RBSP 前要删掉那个 `03`。
   static Uint8List _withoutEmulationPrevention(Uint8List raw) {
     if (!raw.contains(3)) {
