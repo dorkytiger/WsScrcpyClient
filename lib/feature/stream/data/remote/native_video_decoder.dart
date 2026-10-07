@@ -5,11 +5,13 @@ import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/remote/video_decoder.dart';
 
 /// 原生 H.264 硬解通道（与平台实现共用同一份 MethodChannel 契约）。
 ///
 /// - Android：`android/app/src/main/kotlin/.../ScrcpyVideoDecoder.kt`（MediaCodec）；
-/// - Windows：`windows/runner/scrcpy_video_decoder.cpp`（Media Foundation MFT）。
+/// - Windows：`windows/runner/scrcpy_video_decoder.cpp`（Media Foundation MFT）；
+/// - iOS / macOS：`darwin/ScrcpyVideoDecoder.swift`（VideoToolbox，**两端共用同一份**）。
 ///
 /// 只负责"建解码器 / 喂帧 / 收尺寸变化 / 释放"，不理解投流协议；
 /// 帧从哪来由 `StreamSessionService` 提供。
@@ -19,7 +21,7 @@ import 'package:ws_scrcpy_client/core/stream/display_info.dart';
 /// - 需要立刻知道时调 [getSize] 主动拉一次；
 /// - 因此原生侧**没有** `onSizeChanged` 反向推送，也就没有"解码线程投递到
 ///   platform thread"这条生命周期易碎路径（Windows 崩溃 0x58CA5 的根因，见 AGENTS §12）。
-class NativeVideoDecoder {
+class NativeVideoDecoder extends VideoDecoder {
   NativeVideoDecoder({AppLogger? logger})
     : _logger = logger ?? AppLogger('NativeVideoDecoder');
 
@@ -54,15 +56,19 @@ class NativeVideoDecoder {
   int _loggedCompleted = 0;
 
   /// 解码器返回的真实画面尺寸变化（投流中可能随设备旋转变化）。
+  @override
   Stream<VideoSize> get sizeChanges => _sizeChanges.stream;
 
   /// 最近一次从原生侧拿到的尺寸；从未拿到过时为 null。
+  @override
   VideoSize? get lastSize => _lastSize;
 
   /// 是否已经拿到纹理（用于 UI 决定渲染 Texture 还是占位图）。
+  @override
   bool get hasTexture => _hasTexture;
 
   /// 创建解码器并返回纹理 id。
+  @override
   Future<Result<int>> create() async {
     _installHandler();
     try {
@@ -79,7 +85,7 @@ class NativeVideoDecoder {
     } on MissingPluginException catch (error, stackTrace) {
       return Result.failure(
         RemoteException(
-          message: '当前平台没有原生解码器实现（目前支持 Android / Windows）',
+          message: '当前平台没有原生解码器实现（目前支持 Android / Windows / iOS / macOS）',
           exception: error,
           stackTrace: stackTrace,
         ),
@@ -100,6 +106,7 @@ class NativeVideoDecoder {
   ///
   /// 返回 null 表示当前平台没有实现 / 通道不可用；此时保留上一次已知尺寸，
   /// **不要**把它当成"尺寸变成未知"（否则 UI 会闪回 16:9 占位）。
+  @override
   Future<VideoSize?> getSize() async {
     if (!_hasTexture) {
       return _lastSize;
@@ -120,6 +127,7 @@ class NativeVideoDecoder {
   ///
   /// 回执里带回 `{width, height}`（Windows 实现），顺手更新尺寸；
   /// 没有带回尺寸的实现（例如 Android 的旧契约）就什么也不做。
+  @override
   Future<Result<void>> pushFrame(Uint8List frame) async {
     if (!_hasTexture) {
       return failureVoid(const BusinessException(message: '解码器尚未就绪，无法喂帧'));
@@ -148,7 +156,7 @@ class NativeVideoDecoder {
     } on MissingPluginException catch (error, stackTrace) {
       result = failureVoid(
         RemoteException(
-          message: '当前平台没有原生解码器实现（目前支持 Android / Windows）',
+          message: '当前平台没有原生解码器实现（目前支持 Android / Windows / iOS / macOS）',
           exception: error,
           stackTrace: stackTrace,
         ),
@@ -164,6 +172,7 @@ class NativeVideoDecoder {
   }
 
   /// 释放解码器与纹理；可重复调用。
+  @override
   Future<void> release() async {
     if (!_hasTexture) {
       return;
@@ -179,6 +188,7 @@ class NativeVideoDecoder {
     }
   }
 
+  @override
   Future<void> dispose() async {
     await release();
     await _sizeChanges.close();

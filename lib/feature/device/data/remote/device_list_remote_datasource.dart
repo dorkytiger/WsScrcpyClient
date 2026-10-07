@@ -7,7 +7,7 @@ import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/ws/multiplexed_socket.dart';
-import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
+import 'package:ws_scrcpy_client/core/ws/web_socket_transport_connect.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_action.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_error_translator.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_url_builder.dart';
@@ -32,7 +32,7 @@ class DeviceListRemoteDatasource {
   }) async {
     final WebSocketTransport transport;
     try {
-      transport = await IoWebSocketTransport.connect(
+      transport = await connectWebSocketTransport(
         WsUrlBuilder.action(serverUri, WsAction.multiplex),
         authorization: authorization,
         timeout: timeout,

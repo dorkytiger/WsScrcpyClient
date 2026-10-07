@@ -1,8 +1,5 @@
-import 'dart:io';
-
 import 'package:drift/drift.dart';
-import 'package:drift_flutter/drift_flutter.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:ws_scrcpy_client/core/database/database_executor.dart';
 
 part 'app_database.g.dart';
 
@@ -81,41 +78,12 @@ class AppDatabase extends _$AppDatabase {
     },
   );
 
-  /// 生产环境的连接：交给 `drift_flutter` 处理平台差异（后台 isolate / 原生库加载）。
+  /// 生产环境的连接：**按平台分派**（原生落文件 / web 走 WASM）。
   ///
-  /// 显式提供 `databasePath`，因此文件位置完全由 [resolveDatabaseFile] 决定；
-  /// `name` 只用于多个 isolate 打开同一库时的端口映射。
+  /// 具体实现见 [openAppDatabaseExecutor]（`database_executor.dart` 的条件导出）——
+  /// 这里刻意不 import `dart:io`：它在本文件被 web 复用时只是一份"一调用就抛"的桩，
+  /// 而 `open()` 是在**启动路径**上跑的，踩到就是整个 App 白屏。
   static AppDatabase open() {
-    return AppDatabase(
-      driftDatabase(
-        name: databaseName,
-        native: DriftNativeOptions(
-          databasePath: () async => (await resolveDatabaseFile()).path,
-        ),
-      ),
-    );
-  }
-
-  /// 解析数据库文件路径（目录不存在时创建）。
-  static Future<File> resolveDatabaseFile() async {
-    final directory = await resolveDataDirectory();
-    return File('${directory.path}/$databaseFileName');
-  }
-
-  /// 解析数据目录：`WS_DATA_DIR` 优先，其次应用支持目录。
-  static Future<Directory> resolveDataDirectory() async {
-    final override = dataDirDefine.trim();
-    if (override.isNotEmpty) {
-      return _ensureDirectory(Directory(override));
-    }
-    final supportDirectory = await getApplicationSupportDirectory();
-    return _ensureDirectory(supportDirectory);
-  }
-
-  static Future<Directory> _ensureDirectory(Directory directory) async {
-    if (!await directory.exists()) {
-      await directory.create(recursive: true);
-    }
-    return directory;
+    return AppDatabase(openAppDatabaseExecutor());
   }
 }

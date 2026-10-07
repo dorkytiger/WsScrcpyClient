@@ -1,10 +1,28 @@
-# Forgejo Actions：打包 Android（Linux runner）与 Windows（Windows runner）
+# Forgejo Actions（★ 当前在用的 CI）：打包 Android / web / Windows
+#
+# > 另有一份 GitHub Actions 工作流 `.github/workflows/build.yml`，但它**默认只手动触发**
+# > —— GitHub 私有仓库的 Actions 分钟数要吃免费额度，本仓库改用自托管 Forgejo runner。
+# > 什么时候想切回去见 docs/ci.md §9。
+#>
+#> ★ runner 的标签映射（在 runner 那台机器的 docker-compose 里）：
+#>   `--label docker:docker://data.forgejo.org/oci/node:20-bookworm`        ← 好的
+#>   `--label ubuntu-latest:docker://data.forgejo.org/oci/ubuntu:24.04`    ← ★ 坏的：
+#>     Forgejo 那个 OCI registry **没有 ubuntu 这个仓库**（实测 NAME_UNKNOWN），
+#>     所以 `runs-on: ubuntu-latest` 的 job 一律在 Set up job 阶段就失败。
+#>   **本工作流采用方案 ②**：三个 Linux job 都写 `runs-on: docker`（那个标签指向
+#>   `oci/node:20-bookworm`，实测 manifest 200 可拉）。等你把 runner 的
+#>   `ubuntu-latest` 那行也改成 `oci/node:20-bookworm`（见 docs/ci.md §2.1），
+#>   再改回 `runs-on: ubuntu-latest` 即可 —— 两种写法的环境完全一样。
 #
 # ── 为什么分成两类 runner ──────────────────────────────────────────────
 # **Flutter 的 Windows 桌面产物只能在 Windows 上构建**（官方不支持交叉编译），
-# 而 Android APK 在 Linux 上完全没问题。所以：
-#   * `verify` / `android` → `runs-on: ubuntu-latest`（用你现有的 Docker/Linux runner 即可）
-#   * `windows`            → `runs-on: windows`（需要一台 Windows 自托管 runner）
+# 而 Android APK 与 web 在 Linux 上完全没问题。所以：
+#   * `verify` / `android` / `web` → `runs-on: docker`（你现有 Linux runner 的 `docker` 标签；
+#     为什么不是 `ubuntu-latest` 见本文件开头的标签映射说明）
+#   * `windows`                   → `runs-on: windows`（需要一台 Windows 自托管 runner）
+#
+# **Apple 两端（iOS / macOS）不在 CI 里**：那需要 macOS runner，自托管一台 Mac 只为构建不划算
+# （iOS 还要签名）。Apple 包本机出：`flutter build ios --no-codesign` / `flutter build macos`。
 #
 # **Windows 那个 job 默认不跑**：仓库变量 `WINDOWS_RUNNER=true` 才会执行，
 # 免得还没注册 Windows runner 时它一直挂在队列里。注册步骤见 docs/ci.md §2；
@@ -12,6 +30,7 @@
 #
 # ── 产物 ──────────────────────────────────────────────────────────────
 #   * android-apk : ws_scrcpy_client-<版本>.apk（universal；手动触发可按 ABI 拆分）
+#   * web-dist    : ws_scrcpy_client-<版本>-web.zip（静态站点，可挂到服务端同源下）
 #   * windows-x64 : ws_scrcpy_client-<版本>-windows-x64.zip（解压即用）
 #
 # 版本号：打 tag（v1.2.3）时用 tag 名做 --build-name、run number 做 build 号；
@@ -43,7 +62,11 @@ jobs:
   # ── 1. 静态检查 + 单测（与平台无关，跑在 Linux 上最快）────────────────────
   verify:
     name: 静态检查与单测
-    runs-on: ubuntu-latest
+    # ★ 不用 ubuntu-latest：runner 把那个标签映射到了**不存在**的仓库
+    #   `data.forgejo.org/oci/ubuntu`（实测 NAME_UNKNOWN），job 会在 Set up job 就死。
+    #   `docker` 标签映射的是 `oci/node:20-bookworm`（实测 200 可拉）——环境一样是
+    #   Debian + node，Flutter/JDK/Android SDK 都由工作流自己装。
+    runs-on: docker
     timeout-minutes: 30
     steps:
       - name: 检出
@@ -55,6 +78,13 @@ jobs:
           flutter-version: '3.47.1'
           channel: stable
           cache: true
+
+      - name: 基础工具（镜像里未必带 zip/unzip）
+        run: |
+          set -e
+          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq zip unzip
+          fi
 
       - name: 工具链版本
         run: flutter --version
@@ -71,7 +101,11 @@ jobs:
   # ── 2. Android APK（Linux runner）────────────────────────────────────
   android:
     name: Android APK
-    runs-on: ubuntu-latest
+    # ★ 不用 ubuntu-latest：runner 把那个标签映射到了**不存在**的仓库
+    #   `data.forgejo.org/oci/ubuntu`（实测 NAME_UNKNOWN），job 会在 Set up job 就死。
+    #   `docker` 标签映射的是 `oci/node:20-bookworm`（实测 200 可拉）——环境一样是
+    #   Debian + node，Flutter/JDK/Android SDK 都由工作流自己装。
+    runs-on: docker
     needs: verify
     timeout-minutes: 90
     env:
@@ -94,6 +128,15 @@ jobs:
           flutter-version: '3.47.1'
           channel: stable
           cache: true
+
+      - name: 基础工具（镜像里未必带 zip/unzip）
+        # job 容器用的是 node:*-bookworm 这类镜像，别假设它有 zip/unzip：
+        # web 那步要 zip 打包，Android SDK 的 cmdline-tools 是 zip 包（要 unzip）。
+        run: |
+          set -e
+          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq zip unzip
+          fi
 
       - name: 装 Android SDK（cmdline-tools + 平台/构建工具）
         uses: android-actions/setup-android@v3
@@ -149,7 +192,64 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # ── 3. Windows 桌面端（需要 Windows runner；用仓库变量开关）────────────
+  # ── 3. web 静态站点（Linux runner 就能构建）────────────────────────────
+  web:
+    name: web 站点
+    # ★ 不用 ubuntu-latest：runner 把那个标签映射到了**不存在**的仓库
+    #   `data.forgejo.org/oci/ubuntu`（实测 NAME_UNKNOWN），job 会在 Set up job 就死。
+    #   `docker` 标签映射的是 `oci/node:20-bookworm`（实测 200 可拉）——环境一样是
+    #   Debian + node，Flutter/JDK/Android SDK 都由工作流自己装。
+    runs-on: docker
+    needs: verify
+    timeout-minutes: 45
+    env:
+      REF_NAME: ${{ forgejo.ref_name }}
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 装 Flutter（版本与 AGENTS.md §2 对齐）
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: stable
+          cache: true
+
+      - name: 依赖
+        run: flutter pub get
+
+      # 脚本自带：① 从 pub 缓存准备 sqlite3.wasm + drift_worker.js（不进仓库）
+      # ② `--no-web-resources-cdn`（否则离线环境永远白屏，见 AGENTS §9.3）
+      - name: 构建 web
+        run: tools/build_web.sh
+
+      - name: 基础工具（镜像里未必带 zip/unzip）
+        # job 容器用的是 node:*-bookworm 这类镜像，别假设它有 zip/unzip：
+        # web 那步要 zip 打包，Android SDK 的 cmdline-tools 是 zip 包（要 unzip）。
+        run: |
+          set -e
+          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq zip unzip
+          fi
+
+      - name: 打包 zip
+        run: |
+          set -e
+          NAME="dev"
+          if [[ "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then NAME="${REF_NAME#v}"; fi
+          mkdir -p dist
+          (cd build/web && zip -qr "../../dist/ws_scrcpy_client-$NAME-web.zip" .)
+          ls -lh dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: web-dist
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── 4. Windows 桌面端（需要 Windows runner；用仓库变量开关）────────────
   windows:
     name: Windows 桌面（x64）
     # 没注册 Windows runner 之前不跑，避免任务一直排队。

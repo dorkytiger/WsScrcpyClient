@@ -102,3 +102,7 @@ engine_stderr.log
 # 本机与 CI 的发行产物（tools\build_release.cmd / .forgejo 工作流写这里）
 /dist/
 
+
+# web 端运行时资源：由 tools/prepare_web_deps.sh 从本地 pub 缓存取（~1.5MB，不进仓库）
+web/sqlite3.wasm
+web/drift_worker.js

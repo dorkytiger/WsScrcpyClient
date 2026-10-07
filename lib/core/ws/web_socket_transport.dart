@@ -1,8 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 /// WebSocket 传输抽象：复用层只依赖这个接口，便于用假实现在单元测试里验证协议。
+///
+/// **本文件是纯 Dart**（不 import `dart:io`，也不 import Flutter）：
+/// 它在 web 上要能原样编。具体实现按平台分派，见 `web_socket_transport_connect.dart`。
 abstract interface class WebSocketTransport {
   /// 收到的原始消息：`String`（文本帧）或 [Uint8List]（二进制帧）。
   Stream<Object> get messages;
@@ -12,48 +14,4 @@ abstract interface class WebSocketTransport {
   void sendBinary(Uint8List data);
 
   Future<void> close([int code = 1000, String? reason]);
-}
-
-/// 基于 `dart:io` 的实现（Android / iOS / Windows / macOS / Linux 通用）。
-class IoWebSocketTransport implements WebSocketTransport {
-  IoWebSocketTransport._(this._socket);
-
-  final WebSocket _socket;
-
-  /// 建立连接。[authorization] 为完整的 `Authorization` 头取值（如 `Basic xxx=`）。
-  ///
-  /// 关闭 permessage-deflate：视频码流是已压缩数据，再压一层只会增加延迟与 CPU 开销。
-  static Future<WebSocketTransport> connect(
-    Uri uri, {
-    String? authorization,
-    Duration timeout = const Duration(seconds: 15),
-  }) async {
-    final socket = await WebSocket.connect(
-      uri.toString(),
-      headers: authorization == null
-          ? null
-          : <String, dynamic>{'Authorization': authorization},
-      compression: CompressionOptions.compressionOff,
-    ).timeout(timeout);
-    return IoWebSocketTransport._(socket);
-  }
-
-  @override
-  bool get isOpen => _socket.readyState == WebSocket.open;
-
-  @override
-  Stream<Object> get messages => _socket.map<Object>(
-    (event) => event is String
-        ? event
-        : event is Uint8List
-        ? event
-        : Uint8List.fromList((event as List<int>)),
-  );
-
-  @override
-  void sendBinary(Uint8List data) => _socket.add(data);
-
-  @override
-  Future<void> close([int code = 1000, String? reason]) =>
-      _socket.close(code, reason);
 }

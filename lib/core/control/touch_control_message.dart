@@ -103,8 +103,8 @@ class AndroidMotionEventButtons {
 ///
 /// 关于第 29 字节：bundle 写序列只覆盖偏移 0..27（共 28 字节），
 /// 但 `Buffer.alloc` 分配的是 `PAYLOAD_LENGTH + 1 = 29` 字节且**零填充**，
-/// 所以线上实际发出的是 29 字节、末字节为 0——与 `FLUTTER_AGENT.md` §2.4
-/// "共 29 字节"一致。此处**逐字节复刻**，原因见 [trailingPaddingLength]。
+/// 所以线上实际发出的是 29 字节、末字节为 0——与实测记录（`docs/ws-scrcpy-protocol.md`
+/// §2.4）的"共 29 字节"一致。此处**逐字节复刻**，原因见 [trailingPaddingLength]。
 class TouchControlMessage extends ControlMessage {
   TouchControlMessage({
     required this.action,

@@ -1,3 +1,4 @@
+import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_action.dart';
 import 'package:ws_scrcpy_client/core/ws/ws_url_builder.dart';
 
@@ -38,7 +39,13 @@ class StreamTarget {
       .toList(growable: false);
 
   /// 按优先级排列的候选地址：代理优先，其次直连。
-  List<Uri> get candidateUris => <Uri>[...proxiedUris, ...directUris];
+  ///
+  /// **web 上只给代理地址**（2026-10-02 实测）：浏览器不给 WebSocket 加自定义请求头，
+  /// Basic 凭据只能由浏览器按 origin 代管；而设备直连地址（`192.168.x.x:8000`）
+  /// 与服务端入口**不是同一个 origin**，每试一个都会**单独弹一次登录框**，
+  /// 公网入口下这些地址本来也不可达 —— 用户看到的就是"每次点击都要 basic auth"。
+  List<Uri> get candidateUris =>
+      isWebPlatform ? proxiedUris : <Uri>[...proxiedUris, ...directUris];
 
   /// 网页端投流页的深链：在 WebView 里打开它就**直接**进入该设备的投流页。
   ///

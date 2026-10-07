@@ -41,12 +41,45 @@ void main() {
       expect(result.error!.message, contains('http'));
     });
 
-    test('只填账号不填密码被拒绝（成对填写）', () async {
+    test('原生端：只填账号不填密码被拒绝（成对填写）', () async {
       final result = await context.service.save(
         settingsDto(
           serverUrl: 'https://android.dorkytiger.top/',
           username: 'u',
           password: '',
+        ),
+      );
+      expect(result.isError, isTrue);
+      expect(result.error!.message, contains('同时填写'));
+    });
+
+    test('★ web 端：只填账号能保存（密码由浏览器代管，表单里本来就没有密码框）', () async {
+      // 用户实测："你这不是自相矛盾了吗" —— 表单把密码框藏了，校验却要求成对填写，
+      // 于是 web 上永远存不下配置。web 上"有账号没密码"是正常状态。
+      final web = SettingsTestContext(isWeb: true);
+      addTearDown(web.dispose);
+      final result = await web.service.save(
+        settingsDto(
+          serverUrl: 'https://android.dorkytiger.top/',
+          username: 'u758272094',
+          password: '',
+        ),
+      );
+      expect(result.isError, isFalse, reason: result.isError ? result.error!.message : '');
+      final saved = await web.service.load();
+      expect(saved.isSuccess, isTrue);
+      expect(saved.data!.username, 'u758272094');
+      expect(saved.data!.password, isEmpty);
+    });
+
+    test('★ web 端：填了密码却没账号仍然拒绝（那是把账号填进密码框了）', () async {
+      final web = SettingsTestContext(isWeb: true);
+      addTearDown(web.dispose);
+      final result = await web.service.save(
+        settingsDto(
+          serverUrl: 'https://android.dorkytiger.top/',
+          username: '',
+          password: 'oops',
         ),
       );
       expect(result.isError, isTrue);

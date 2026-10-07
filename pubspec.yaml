@@ -41,10 +41,15 @@ dependencies:
   # 投流/操作期间保持屏幕常亮
   wakelock_plus: ^1.2.10
 
+  # web 端解码要用 WebCodecs 的类型化绑定（VideoDecoder / VideoFrame / EncodedVideoChunk）
+  web: ^1.1.1
+
   # M1：WebView 壳（Android / iOS / macOS）
   # 桌面端无内嵌 WebView 时，用系统浏览器打开服务入口
   url_launcher: ^6.3.1
   webview_all: ^1.4.3
+  # web 端的 WebSocket（浏览器不允许自定义请求头，见 web_socket_transport_web.dart）
+  web_socket_channel: ^3.0.3
   drift: ^2.35.0
   drift_flutter: ^0.3.1
   path_provider: ^2.1.6

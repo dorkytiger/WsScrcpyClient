@@ -1,22 +1,30 @@
-# CI：用 Forgejo Actions 打包 Windows / Android
+# CI：用 Forgejo Actions 打包 Android / web / Windows
 
 工作流：[`.forgejo/workflows/build.yml`](../.forgejo/workflows/build.yml)；
-本机打包（不走 CI）：`tools\build_release.cmd`。
+本机打包（不走 CI）：`tools\build_release.cmd`（Windows / Android）、`tools/build_web.sh`（web）。
 本文讲"怎么跑起来"和"出错了看哪里"。
 
+> **★ 这是当前在用的 CI（自托管 runner，不花额度）。**
+> 另有一份 GitHub Actions 工作流 `.github/workflows/build.yml`，但它**默认只手动触发** ——
+> GitHub 私有仓库的 Actions 分钟数要吃每月免费额度。想切回去看 **§9**。
+>
 > Forgejo 也兼容读 `.gitea/workflows/`；本仓库统一用 `.forgejo/workflows/`。
 > 工作流里的上下文用 `forgejo.*`（`github.*` 作为兼容别名同样可用）。
 
 ## 0. 先看清一件硬约束
 
 **Flutter 的 Windows 桌面产物只能在 Windows 上构建**（官方不支持交叉编译），
-而 **Android APK 在 Linux 上完全没问题**。所以本项目把 CI 分成两类 runner：
+而 **Android APK 与 web 在 Linux 上完全没问题**。所以本项目把 CI 分成两类 runner：
 
 | job | 需要的 runner | 能不能用你现有的 `lingke`（`docker` / `ubuntu-latest`） |
 |---|---|---|
 | `verify`（analyze + test） | Linux 即可 | ✅ 能 |
 | `android`（APK） | Linux 即可 | ✅ 能 |
+| `web`（静态站点 zip） | Linux 即可 | ✅ 能 |
 | `windows`（zip） | **Windows** | ❌ 不能，必须另注册一台 Windows runner |
+
+**Apple 两端（iOS / macOS）不在 CI 里**：需要 macOS runner，自托管一台 Mac 只为构建不划算
+（iOS 还要过签名）。Apple 包本机出：`flutter build ios --release --no-codesign` / `flutter build macos --release`。
 
 `windows` 这个 job **默认是关的**（仓库变量 `WINDOWS_RUNNER=true` 才跑），
 免得还没注册 Windows runner 时任务一直挂在队列里。
@@ -28,7 +36,7 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 ## 1. runner 需要什么
 
-### Linux runner（现有那台，跑 `verify` + `android`）
+### Linux runner（现有那台，跑 `verify` + `android` + `web`）
 
 工具链**不用预装**——工作流里现装（`subosito/flutter-action` + `actions/setup-java` +
 `android-actions/setup-android`），因此只要：
@@ -54,10 +62,69 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 ## 2. 注册 runner
 
-### 2.1 你已有的（Linux）
+### 2.1 Linux runner：标签 = "**标签名 : 用哪个镜像跑**"
 
-`lingke` 已在线（标签 `docker`、`ubuntu-latest`，状态空闲），工作流里
-`runs-on: ubuntu-latest` 就是找它，**不需要动**。
+这台 runner 跑在 Docker 里（docker-compose：`forgejo-runner` + `docker-in-docker`），
+标签是**写在 compose 的 `command` 里的 `--label`**：
+
+```yaml
+command: >
+  forgejo-runner daemon --config runner-config.yml
+  --label docker:docker://data.forgejo.org/oci/node:20-bookworm        # ← 可拉（实测 200）
+  --label ubuntu-latest:docker://data.forgejo.org/oci/ubuntu:24.04    # ← ★ 坏的
+```
+
+#### ★ 已经踩到的坑（2026-10-07）：`oci/ubuntu` 这个仓库**不存在**
+
+症状：job 在 **Set up job** 阶段就结束，后面每步都是 0s：
+
+```
+Start image=data.forgejo.org/oci/ubuntu:24.04
+Error response from daemon: failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04":
+  data.forgejo.org/oci/ubuntu:24.04: not found
+```
+
+**看起来像工作流报错，其实是 runner 的标签映射问题**（工作流里只有 `runs-on: ubuntu-latest`）。
+直接问那个 registry 就能确认（实测，不是推测）：
+
+```console
+$ curl -s https://data.forgejo.org/v2/oci/ubuntu/tags/list
+{"errors":[{"code":"NAME_UNKNOWN","message":"repository name not known to registry",
+  "detail":{"name":"oci/ubuntu"}}]}                                    # ← 整个仓库都不存在
+
+$ curl -s https://data.forgejo.org/v2/oci/node/tags/list | head -c 120
+{"name":"oci/node","tags":["16-bullseye","16-buster","20","20-bookworm",…  # ← 有
+```
+
+也就是说 `oci/ubuntu:24.04` **不是 tag 写错，是那个路径从来没有过**，
+而 `oci/node`、`oci/python`、`oci/golang`、`oci/alpine`、`oci/debian` 都有。
+
+#### 修法（二选一）
+
+**① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
+
+```yaml
+# docker-compose.yml 里 runner 的 command
+--label ubuntu-latest:docker://data.forgejo.org/oci/node:20-bookworm
+```
+
+```bash
+docker compose up -d forgejo-runner     # 让新标签生效
+```
+
+**② 不改服务器，改工作流**：把 `verify` / `android` / `web` 三个 job 的
+`runs-on: ubuntu-latest` 换成 `runs-on: docker` —— 那个标签本来就指向可拉的
+`oci/node:20-bookworm`。代价是标签名不好读（"docker"其实指的是执行方式）。
+
+#### 这两个镜像里有什么、没什么（别假设）
+
+| | 说明 |
+|---|---|
+| `node` ✓ | **JS action 必需**（`actions/checkout`、`upload-artifact` 都是 JS，要容器里有 node）—— 这也是**不能**把标签指向纯 `ubuntu`/`alpine` 镜像的原因 |
+| `flutter` ✗ | 由工作流的 `subosito/flutter-action` 自己下载（需要 `curl`/`tar`/`xz`，buildpack-deps 基础镜像都有） |
+| `java` ✗ | Android 那步由 `actions/setup-java` 装 JDK 17 |
+| `Android SDK` ✗ | 由 `android-actions/setup-android@v3` 装（**GitHub 的 ubuntu-latest 自带 SDK，容器里没有**，所以这一步不能省） |
+| `zip` / `unzip` ? | 不一定有 → 工作流里加了"基础工具"一步按需 `apt-get install` |
 
 ### 2.2 新加一台 Windows runner（可选，为了 CI 也能出 Windows 包）
 
@@ -107,7 +174,9 @@ schtasks /Run /TN "forgejo-runner"
 | job | runner | 作用 | 产物 |
 |---|---|---|---|
 | `verify` | `ubuntu-latest` | `pub get` → `dart analyze lib test tools` → `flutter test` | 无（门禁） |
+| ~~`web`~~ | — | **还没加**（见本节开头的缺口说明） | — |
 | `android` | `ubuntu-latest` | 装 JDK17 + Flutter + Android SDK → `flutter build apk --release` | `android-apk`：`ws_scrcpy_client-<版本>.apk` |
+| `web` | `ubuntu-latest` | `tools/build_web.sh`（自带 `--no-web-resources-cdn` 与运行时资源准备）→ zip | `web-dist`：`…-web.zip` |
 | `windows` | `windows`（需变量开启） | 取原生依赖 → `flutter build windows --release` → zip | `windows-x64`：`ws_scrcpy_client-<版本>-windows-x64.zip` |
 
 - **触发**：推 `main`/`master`、打 `v*` tag、PR、手动 `workflow_dispatch`。
@@ -165,6 +234,7 @@ tools\build_release.cmd -SkipTests              # 跳过 analyze/test，赶紧�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | runner 的 `--label` 把 `ubuntu-latest` 映射到了**不存在的仓库** `oci/ubuntu`（那个 registry 只有 node/python/golang/alpine/debian） | 把那一行换成 `oci/node:20-bookworm` 后 `docker compose up -d`（见 §2.1）；或把工作流改成 `runs-on: docker` |
 | `windows` job 一直"等待中" | 没有标签为 `windows` 的 runner（现有 `lingke` 是 Linux/Docker） | 注册 Windows runner（§2.2），或先关掉它（别设 `WINDOWS_RUNNER` 变量），Windows 包用 `tools\build_release.cmd -Platform windows` |
 | 下载 action 失败 / `uses:` 解析不了 | runner 的 `DEFAULT_ACTIONS_URL` 指不到 GitHub 或代理不通 | 在 runner 的 `config.yml` 里设 `[actions] DEFAULT_ACTIONS_URL = https://github.com`（或把 action 从内网镜像取） |
 | `[nuget_shim] ERROR: WebView2 / WIL packages are missing` | 干净 checkout 没跑取包那步 | 工作流已含 `prepare_windows_deps.ps1 -Online`；若仍报错，看它上面一条下载是否被网络拦了 |
@@ -183,3 +253,22 @@ Forgejo **不会**像 GitHub 那样自带 `secrets.GITHUB_TOKEN`，需要在
 然后取消 `build.yml` 末尾 `release` job 的注释并把 `token:` 指向该 secret
 （用官方 `actions/forgejo-release@v2`）。不配也行 —— 产物从 Actions 页面的
 Artifacts 下载，日常够用。
+
+## 9. 以后想切到 GitHub Actions？（工作流已经写好，默认关着）
+
+`.github/workflows/build.yml` 是一份**完整但默认不自动跑**的工作流（只留 `workflow_dispatch`）：
+它比 Forgejo 这份多了**iOS + macOS**（GitHub 自带 `macos-latest`）和**tag 自动发 Release**。
+
+**为什么默认关着**：GitHub **私有仓库**的 Actions 要吃每月免费额度（自托管 Forgejo runner 不吃）。
+如果这个仓库可以**公开**，GitHub 对公开仓库的 Actions 分钟数是免费的 —— 那种情况下直接启用最省事
+（以 GitHub 当前计费页为准）。
+
+**启用步骤**：
+1. 打开 `.github/workflows/build.yml`，把 `on:` 里注释掉的 `push` / `pull_request` 恢复，
+   并删掉开头那段"默认不自动跑"的说明；
+2. 按需在 **Settings → Secrets and variables → Actions** 配 Android 签名（见 §6）；
+3. 把代码推到 GitHub（`gh repo create` 或网页建仓后 `git remote add github …`）；
+4. 打 tag（`git tag v1.0.0 && git push --tags`）就会自动出 Release。
+
+**两份工作流可以并存**：Forgejo 只读 `.forgejo/workflows/`，**不读** `.github/workflows/`，
+所以不会重复跑。

@@ -44,8 +44,12 @@ class AppLogger {
     if (level == AppLogLevel.debug && !verbose) {
       return;
     }
+    // 前缀带上**毫秒时间戳**：用户报"旋转后卡了几十秒"这类问题时，
+    // 日志里的"时间缺口"是唯一能分清两种原因的证据 ——
+    // 每秒一条的统计行断了几十秒 = 我们自己的 UI/引擎被卡住；
+    // 统计行一直在、只有画面不动 = 卡在视频管线（服务端没给帧 / 解码器没解出来）。
     final line =
-        '[$tag] ${level.description}: $message'
+        '[${_timestamp()}] [$tag] ${level.description}: $message'
         '${error == null ? '' : ' | cause: $error'}';
     developer.log(
       line,
@@ -55,6 +59,15 @@ class AppLogger {
       stackTrace: stackTrace,
     );
     onRecord?.call(line);
+  }
+
+  /// `HH:mm:ss.SSS`（本地时间）。
+  static String _timestamp() {
+    final now = DateTime.now();
+    String two(int value) => value.toString().padLeft(2, '0');
+    String three(int value) => value.toString().padLeft(3, '0');
+    return '${two(now.hour)}:${two(now.minute)}:${two(now.second)}'
+        '.${three(now.millisecond)}';
   }
 
   int _levelValue(AppLogLevel level) => switch (level) {

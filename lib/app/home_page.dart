@@ -141,7 +141,6 @@ class _HomePageState extends State<HomePage> {
         lastUdid: settings.lastUdid,
         onStartStream: _openStream,
         onOpenWebStream: _openWebStream,
-        onOpenSettings: () => setState(() => _index = 1),
       ),
       SettingsPage(viewModel: dependencies.settingsViewModel),
     ];

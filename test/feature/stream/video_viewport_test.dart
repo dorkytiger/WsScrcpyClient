@@ -107,4 +107,65 @@ void main() {
       expect(point.y, inInclusiveRange(0, 1079));
     });
   });
+
+  /// 铺满（cover）：手机横屏画面区约 3:1、设备是 16:9，contain 会浪费 43% 的宽度，
+  /// 所以给了一个"铺满"选项。**它必须和渲染用同一套变换**，否则点了会偏。
+  group('VideoViewport cover（铺满裁切）', () {
+    // 同一个几何：3:1 的画面区 + 16:9 的视频。
+    const contain = VideoViewport(
+      videoWidth: 1280,
+      videoHeight: 720,
+      viewWidth: 810,
+      viewHeight: 270,
+    );
+    const cover = VideoViewport(
+      videoWidth: 1280,
+      videoHeight: 720,
+      viewWidth: 810,
+      viewHeight: 270,
+      fit: VideoFitMode.cover,
+    );
+
+    test('contain 高度受限、左右留黑边', () {
+      expect(contain.scale, closeTo(270 / 720, 1e-9));
+      expect(contain.displayWidth, closeTo(480, 1e-6));
+      expect(contain.offsetX, closeTo((810 - 480) / 2, 1e-6));
+      expect(contain.offsetX, greaterThan(0));
+      // 黑边上的点不转发。
+      expect(contain.toVideoPoint(10, 135), isNull);
+    });
+
+    test('cover 取较大的比例、偏移为负（画面比控件大）', () {
+      expect(cover.scale, closeTo(810 / 1280, 1e-9));
+      expect(cover.displayWidth, closeTo(810, 1e-6));
+      expect(cover.displayHeight, closeTo(720 * 810 / 1280, 1e-6));
+      expect(cover.displayHeight, greaterThan(270));
+      // 被裁掉的部分：偏移是负的。
+      expect(cover.offsetY, lessThan(0));
+    });
+
+    test('cover 下整个控件都映射到合法视频像素（不再有 null）', () {
+      for (final x in <double>[0, 1, 405, 809]) {
+        for (final y in <double>[0, 1, 135, 269]) {
+          final point = cover.toVideoPoint(x, y);
+          expect(point, isNotNull, reason: '铺满时 ($x,$y) 不该是黑边');
+          expect(point!.x, inInclusiveRange(0, 1279));
+          expect(point.y, inInclusiveRange(0, 719));
+        }
+      }
+    });
+
+    test('cover 下控件中心仍映射到视频中心', () {
+      expect(cover.toVideoPoint(405, 135), const VideoPoint(640, 360));
+    });
+
+    test('cover 的 scale 严格大于 contain（同样的画面区）', () {
+      expect(cover.scale, greaterThan(contain.scale));
+    });
+
+    test('toggle 在两个模式之间来回切', () {
+      expect(VideoFitMode.contain.toggled, VideoFitMode.cover);
+      expect(VideoFitMode.cover.toggled, VideoFitMode.contain);
+    });
+  });
 }

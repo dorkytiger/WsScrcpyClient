@@ -1,6 +1,7 @@
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
+import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/feature/settings/application/repository/settings_repository.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/dto/save_settings_dto.dart';
@@ -14,11 +15,15 @@ import 'package:ws_scrcpy_client/feature/settings/data/model/vo/settings_profile
 /// 密码只在安全存储里，写失败会降级为"仅本次会话有效"，
 /// 具体状态通过 [AppSettingsVo.passwordPersisted] 暴露给 UI。
 class SettingsService {
-  SettingsService(this._repository, {AppLogger? logger})
-    : _logger = logger ?? AppLogger('SettingsService');
+  /// [isWeb] 只给测试用（VM 里 `isWebPlatform` 恒为 false，验不了 web 分支）；
+  /// 生产代码不传，取编译期常量。
+  SettingsService(this._repository, {AppLogger? logger, bool? isWeb})
+    : _logger = logger ?? AppLogger('SettingsService'),
+      _isWeb = isWeb ?? isWebPlatform;
 
   final SettingsRepository _repository;
   final AppLogger _logger;
+  final bool _isWeb;
 
   /// 出厂默认设置。
   static const AppSettingsVo defaults = AppSettingsVo(
@@ -233,7 +238,18 @@ class SettingsService {
       );
     }
     // 服务端要么不开鉴权，要么账号密码成对填写；只填一个几乎必然是笔误。
-    if (username.trim().isEmpty != password.isEmpty) {
+    //
+    // **web 例外**（2026-10-07 用户实测："你这不是自相矛盾了吗"）：
+    // web 上密码框是**故意隐藏**的——浏览器不给 WebSocket 加自定义请求头，凭据由浏览器
+    // 在 Basic Auth 挑战里代管（见 AGENTS §9.3）。所以"只填账号"在 web 上是**正常状态**，
+    // 按笔误拒绝就会出现"表单说密码不用填、保存却说你没填密码"这种自相矛盾。
+    // 反方向（填了密码却没账号）两边都是笔误：多半是把账号填进了密码框。
+    final hasUsername = username.trim().isNotEmpty;
+    final hasPassword = password.isNotEmpty;
+    if (hasPassword && !hasUsername) {
+      return const ValidationException(message: 'Basic Auth 的账号与密码需要同时填写');
+    }
+    if (!_isWeb && hasUsername && !hasPassword) {
       return const ValidationException(message: 'Basic Auth 的账号与密码需要同时填写');
     }
     return null;

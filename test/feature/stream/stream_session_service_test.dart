@@ -10,9 +10,12 @@ import 'package:ws_scrcpy_client/core/stream/display_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
 import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
+import 'package:ws_scrcpy_client/core/ws/ws_error_translator.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/model/bo/stream_session_snapshot.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/stream_remote_datasource.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.dart';
+import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 
 import '../../core/stream/stream_fixtures.dart';
 
@@ -138,9 +141,9 @@ void main() {
     expect(sent.displayId, 0);
     // sendFrameMeta 必须为 false：我们解的是裸 Annex-B，不解析每帧前 12 字节帧信息。
     expect(sent.sendFrameMeta, isFalse);
-    // UI 还没报尺寸：沿用服务端给的 bounds，但**必须收敛到设备原生范围内 + 16 对齐**
+    // UI 还没报尺寸：沿用服务端给的 bounds，但**必须收敛到设备原生范围内 + 设备同比例 + 16 对齐**
     // （服务端给的 1856x960 大于原生 1280x720；见 AGENTS §12.7/§12.8）。
-    expect(sent.bounds, const VideoSize(1280, 656));
+    expect(sent.bounds, const VideoSize(1280, 720));
   });
 
   test('首发只发一条且带上 UI 的最终视口尺寸（不先发 null 再补发）', () async {
@@ -157,8 +160,9 @@ void main() {
     );
     expect(settings, hasLength(1), reason: '首发必须一次到位，不能补发第二条');
     // 视口 1898x853 大于设备原生 1280x720 → 按比例收敛，**绝不要求放大**（AGENTS §12.7），
-    // 并向下对齐到 16×16 宏块（575 → 560，AGENTS §12.8：非对齐尺寸的流 MF 解不出来）。
-    expect(settingsOf(settings.single).bounds, const VideoSize(1280, 560));
+    // 并向下对齐到 16×16 宏块（§12.8：非对齐尺寸的流 MF 解不出来）。
+    // 先按设备比例（16:9）把视口收成 1516x853 的框，再收到原生范围内 → 1280x720。
+    expect(settingsOf(settings.single).bounds, const VideoSize(1280, 720));
 
     // 初始信息头再来（服务端重发很常见）也不该再发第二条。
     transport.emit(loadInitialInfoFixture());
@@ -169,7 +173,7 @@ void main() {
     );
   });
 
-  test('UI 尺寸晚于初始信息头：兜底先发一条，UI 报尺寸后补一条更新', () async {
+  test('UI 尺寸晚于初始信息头：兜底那条等价时不再补发，视口真的更小时才补', () async {
     await service.start(target);
     transport.emit(loadInitialInfoFixture());
     await pumpEventQueue(); // 兜底定时器（测试里是 0ms）在这一步触发
@@ -179,18 +183,26 @@ void main() {
     );
     expect(
       first.bounds,
-      const VideoSize(1280, 656),
-      reason: '等不到 UI 尺寸时用服务端给的值，但仍要收敛到原生范围内（不放大）+ 16 对齐',
+      const VideoSize(1280, 720),
+      reason: '等不到 UI 尺寸时用服务端给的值，但仍要收敛到原生范围内（不放大）+ 同设备比例 + 16 对齐',
     );
 
-    // UI 布局好了，报上真实视口：这时才补一条（这是正常的"尺寸变化"路径）。
+    // UI 布局好了，报上桌面窗口那样的视口：收敛后**还是原生 1280x720**，
+    // 与兜底那条完全等价 → **不该再发**（每多发一条服务端就重建一次编码器）。
     service.applyViewportBounds(width: 1898, height: 853);
+    expect(
+      framesOfType(ControlMessageType.changeStreamParameters.code),
+      hasLength(1),
+      reason: '去重比的是收敛后的生效边界：兜底那条已经等价，不必再补一条',
+    );
+
+    // 视口真的小到"收敛结果不同"（800x600 → 800x448）时才补一条。
+    service.applyViewportBounds(width: 800, height: 600);
     final settings = framesOfType(
       ControlMessageType.changeStreamParameters.code,
     );
     expect(settings, hasLength(2));
-    // 同样收敛到原生范围内 + 16 对齐（不放大，AGENTS §12.7/§12.8）。
-    expect(settingsOf(settings.last).bounds, const VideoSize(1280, 560));
+    expect(settingsOf(settings.last).bounds, const VideoSize(800, 448));
   });
 
   test('重复收到初始信息头时只下发一次视频参数（防反馈循环）', () async {
@@ -354,8 +366,9 @@ void main() {
       ControlMessageType.changeStreamParameters.code,
     );
     expect(settings, hasLength(1));
-    // 100x100 不是 16 的整数倍 → 向下对齐成 96x96（宏块对齐，见 §12.8）。
-    expect(settingsOf(settings.single).bounds, const VideoSize(96, 96));
+    // 100x100 不是设备比例（16:9），也不是 16 的整数倍：
+    // 先按设备比例收成 100x56.25，再向下对齐成 96x48（宏块对齐，见 §12.8）。
+    expect(settingsOf(settings.single).bounds, const VideoSize(96, 48));
   });
 
   test('编码边界一律向下对齐到 16 宏块：非对齐尺寸的流解码器解不出来', () {
@@ -368,16 +381,16 @@ void main() {
         viewport: const VideoSize(1898, 853),
         native: native,
       ),
-      const VideoSize(1280, 560),
-      reason: '等比收敛 1280x575 之后再向下对齐到 560',
+      const VideoSize(1280, 720),
+      reason: '先按设备比例收框（1516x853）再收到原生范围内 → 正好原生满分辨率，且 16 对齐',
     );
     expect(
       StreamSessionService.clampBoundsToNative(
         viewport: const VideoSize(999, 601),
         native: native,
       ),
-      const VideoSize(992, 592),
-      reason: '视口 ≤ 原生：保持不放大，但仍要对齐',
+      const VideoSize(992, 560),
+      reason: '视口 ≤ 原生：保持不放大，但仍要按设备比例收框并对齐',
     );
     expect(
       StreamSessionService.clampBoundsToNative(
@@ -389,6 +402,153 @@ void main() {
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // 编码边界策略（清晰度取舍）：网页端更清楚就是因为它的 bounds 不封顶到原生
+  // ---------------------------------------------------------------------------
+
+  test('★ 清晰优先：允许编码超过设备原生（上限 2 倍），网页端就是这么干的', () {
+    const native = VideoSize(1280, 720);
+    // 1898x853 就是 §12.7 那次真机实测的 Ui 视口（同比例收框后是 1516x853）。
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(1898, 853),
+        native: native,
+        mode: VideoBoundsMode.viewport,
+      ),
+      const VideoSize(1504, 848),
+      reason: '清晰优先下不再封顶到原生，只受"原生 ×2"上限约束，再 16 对齐',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(6000, 3376),
+        native: native,
+        mode: VideoBoundsMode.viewport,
+      ),
+      const VideoSize(2560, 1440),
+      reason: '窗口再大也只到原生 2 倍：容器里的软编码器扛不住更高',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(1898, 853),
+        native: native,
+        mode: VideoBoundsMode.nativeCap,
+      ),
+      const VideoSize(1280, 720),
+      reason: '省设备算力模式保持原行为（AGENTS §12.7：绝不向设备要放大）',
+    );
+  });
+
+  test('★ 后建解码器的补喂缓冲：参数集 + 从最近一个 IDR 开始的帧（web 端全黑的根因）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), isEmpty, reason: '还没收到任何帧');
+
+    // 真实顺序（夹具）：先一条纯参数集（SPS+PPS），再 IDR，再若干 P 帧。
+    final fixture = loadVideoFrameFixture();
+    final parameterSets = fixture[0];
+    final idr = fixture[1];
+    final pFrame = Uint8List.fromList(<int>[0, 0, 0, 1, 0x41, 1, 2, 3]);
+
+    transport.emit(parameterSets);
+    await pumpEventQueue();
+    // 只有参数集：能补，但没有参考帧，序列只有它自己。
+    expect(service.replayFramesForNewDecoder(), hasLength(1));
+
+    transport.emit(pFrame);
+    transport.emit(pFrame);
+    await pumpEventQueue();
+    expect(
+      service.replayFramesForNewDecoder(),
+      hasLength(1),
+      reason: 'IDR 之前的 P 帧不能补（没有参考帧，补了也解不出来）',
+    );
+
+    transport.emit(idr);
+    transport.emit(pFrame);
+    await pumpEventQueue();
+    final replay = service.replayFramesForNewDecoder();
+    expect(replay, hasLength(3), reason: '参数集 + IDR + IDR 之后的 P 帧');
+    expect(replay.first, parameterSets, reason: '参数集必须排在最前面：web 端靠它算 codec 串');
+    expect(replay[1], idr);
+
+    // 再来一个 IDR：缓冲只保留最近那个 GOP。
+    transport.emit(idr);
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), hasLength(2));
+  });
+
+  test('★ 转屏不改编码边界：一条消息都不发（服务端不会重建编码器）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    // 手机竖屏：402x698 逻辑 @3 → 1206x2094 物理。
+    service.applyViewportBounds(width: 1206, height: 2094);
+    final afterPortrait = transport.sent.length;
+    expect(
+      settingsOf(
+        framesOfType(ControlMessageType.changeStreamParameters.code).last,
+      ).bounds,
+      const VideoSize(1280, 720),
+      reason: '竖屏贴原生 → 吸附成原生（免得转屏时来回改边界）',
+    );
+
+    // 转成横屏：874x402 逻辑 @3 → 2622x1206 物理。
+    service.applyViewportBounds(width: 2622, height: 1206);
+    expect(
+      transport.sent.length,
+      afterPortrait,
+      reason: '转屏前后边界都是原生 1280x720，去重应该吃掉第二条：'
+          '每多发一条服务端就重建一次编码器，重建后要等新的 IDR（10s）→ 画面停住几十秒',
+    );
+    expect(
+      service.viewportUpdateSequence,
+      0,
+      reason: '连竖屏那次都不需要补发：首发用的服务端边界收敛后本来就是原生 1280x720，'
+          '转屏前后都一样 → 编码器全程不重建',
+    );
+  });
+
+  test('★ 切换清晰优先：立刻按当前视口补发一条参数（尺寸没变也要发）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    // UI 报上来的视口就是 §12.7 那次实测的 1898x853。
+    service.applyViewportBounds(width: 1898, height: 853);
+    final framesBefore = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(
+      settingsOf(framesBefore.last).bounds,
+      const VideoSize(1280, 720),
+      reason: '默认省设备算力：封顶到设备原生',
+    );
+
+    final result = service.setBoundsMode(VideoBoundsMode.viewport);
+    expect(result.isSuccess, isTrue);
+    final framesAfter = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(
+      framesAfter,
+      hasLength(framesBefore.length + 1),
+      reason: '切换模式必须马上补发一条，否则用户点了开关看不到任何变化',
+    );
+    expect(
+      settingsOf(framesAfter.last).bounds,
+      const VideoSize(1504, 848),
+      reason: '清晰优先：按画面区像素编码（不再封顶到 1280x720）',
+    );
+
+    // 切回去也要立刻生效，而且回到原生封顶。
+    service.setBoundsMode(VideoBoundsMode.nativeCap);
+    final framesBack = framesOfType(
+      ControlMessageType.changeStreamParameters.code,
+    );
+    expect(framesBack, hasLength(framesAfter.length + 1));
+    expect(settingsOf(framesBack.last).bounds, const VideoSize(1280, 720));
+  });
+
   test('已发过参数后断开再改尺寸：返回失败而不是抛异常', () async {
     await service.start(target);
     transport.emit(loadInitialInfoFixture());
@@ -398,4 +558,104 @@ void main() {
     final result = service.applyViewportBounds(width: 123, height: 456);
     expect(result.isError, isTrue);
   });
+
+  /// ★ 回归（2026-10-02 用户实测："每次点击都要 basic auth"）。
+  ///
+  /// 服务端是 nginx 层的 Basic Auth，浏览器**不给 WebSocket 加自定义请求头**，
+  /// 于是每次未认证握手都会再弹一次登录框。而自动重连（指数退避 + 多候选地址）
+  /// 会把这个过程刷屏 —— 所以**鉴权失败必须停下来**，把提示和重试按钮交给用户。
+  group('★ 鉴权失败不自动重连', () {
+    test('鉴权失败 → 直接 failed，不再安排重连', () async {
+      final service = StreamSessionService(
+        _AuthFailingDatasource(),
+        settingsFallbackDelay: Duration.zero,
+      );
+      addTearDown(service.dispose);
+
+      final statuses = <StreamConnectionStatus>[];
+      final subscription = service.snapshots.listen(
+        (StreamSessionSnapshot s) => statuses.add(s.status),
+      );
+      addTearDown(subscription.cancel);
+
+      final result = await service.start(
+        target,
+        authorization: 'Basic dGVzdDp0ZXN0',
+      );
+
+      expect(result.isError, isTrue);
+      expect(
+        isAuthFailure(result.error!),
+        isTrue,
+        reason: '翻译层应该把它认成鉴权失败：${result.error!.message}',
+      );
+      expect(service.snapshot.status, StreamConnectionStatus.failed);
+
+      // 等一段明显超过首次退避的时间：若还安排了重连，这里会看到第 2 次尝试。
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(
+        service.snapshot.status,
+        StreamConnectionStatus.failed,
+        reason: '鉴权失败后不该再自动重连（每次重连都会再弹一次浏览器登录框）',
+      );
+      expect(
+        statuses.where((s) => s == StreamConnectionStatus.reconnecting),
+        isEmpty,
+        reason: '不该进入重连态，实际状态序列：$statuses',
+      );
+    });
+
+    test('对照：非鉴权失败仍然照常重连（别把重连能力一起改坏）', () async {
+      final service = StreamSessionService(
+        // 这个假数据源在 transport 关闭时给的是普通失败，不含 Basic Auth 字样。
+        _FakeStreamRemoteDatasource(_closedTransport()),
+        settingsFallbackDelay: Duration.zero,
+      );
+      addTearDown(service.dispose);
+
+      final statuses = <StreamConnectionStatus>[];
+      final subscription = service.snapshots.listen(
+        (StreamSessionSnapshot s) => statuses.add(s.status),
+      );
+      addTearDown(subscription.cancel);
+
+      final result = await service.start(target);
+      expect(result.isError, isTrue);
+      expect(isAuthFailure(result.error!), isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        statuses.contains(StreamConnectionStatus.reconnecting),
+        isTrue,
+        reason: '普通失败应该进入重连态，实际：$statuses',
+      );
+    });
+  });
+}
+
+/// 一个"已经关掉"的假传输：让 [_FakeStreamRemoteDatasource] 走失败分支。
+_FakeTransport _closedTransport() {
+  final transport = _FakeTransport();
+  transport.isOpen = false;
+  return transport;
+}
+
+/// 返回"需要 Basic Auth"的失败（走真实的翻译函数，
+/// 这样测试同时钉住了"翻译层认得出鉴权失败"这件事）。
+class _AuthFailingDatasource extends StreamRemoteDatasource {
+  @override
+  Future<Result<StreamSession>> connect({
+    required Uri uri,
+    String? authorization,
+    Duration timeout = const Duration(seconds: 10),
+  }) async => Result.failure(
+    translateHandshakeError(
+      Exception(
+        'WebSocketException: Connection to $uri was not upgraded '
+        'to websocket (401 Unauthorized)',
+      ),
+      StackTrace.current,
+    ),
+  );
 }
