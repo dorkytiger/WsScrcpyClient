@@ -259,6 +259,11 @@ jobs:
           printf '%s\n' 84831b9409646a918e30573bab4c9c91346d8abd \
             > "$SDK/licenses/android-sdk-preview-license"
 
+          # 防御：宿主机目录里若还有旧的 cmdline-tools（早期脚本装过），它会把上面那个坑带回来
+          if [ -d "$SDK/cmdline-tools" ]; then
+            echo "★ 发现 $SDK/cmdline-tools —— 它的 sdkmanager 会让 Flutter 去装 NDK 并撞 dl.google.com，删掉"
+            rm -rf "$SDK/cmdline-tools" || echo "（删不掉，可能是只读挂载；请手动 rm -rf）"
+          fi
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           du -sh "$SDK"
