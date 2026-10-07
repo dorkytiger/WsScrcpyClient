@@ -74,6 +74,22 @@ RUN set -eux; \
     rm -f /tmp/pkg.zip; \
     ls "$SDK/platforms" "$SDK/build-tools"
 
+# NDK 标记（**不是**真 NDK，1 个字节的文件）
+#
+# 为什么需要：Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` 会强制 AGP 拿 NDK；
+# 它判断"NDK 已装"的条件是 —— `$SDK/ndk/<版本>/source.properties` 存在
+#（见 flutter_tools/lib/src/android/gradle.dart 的 _getInstalledNdkVersionsForGradle：
+#  它只 list 目录 + 检查 source.properties 是否存在，内容都不读）。
+#   · 有这个标记 → 该版本被认为已装 → 整个 NDK 流程跳过（不调 sdkmanager、不配合成 externalNativeBuild）；
+#   · 没有标记、又没有真 NDK → AGP 报 `NDK not configured. Download it with SDK manager.`（实测）。
+# 本项目没有任何原生代码（Flutter 引擎的 .so 是预编译 AAR 里的），所以真 NDK 用不上。
+# ⚠️ 以后若加了带原生代码的插件，就得换成真 NDK（同版本下载后解到 `ndk/<版本>/`）。
+ARG NDK_VERSION=28.2.13676358
+RUN mkdir -p "/opt/dev/android-sdk/ndk/${NDK_VERSION}" \
+ && printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "${NDK_VERSION}" \
+      > "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties" \
+ && cat "/opt/dev/android-sdk/ndk/${NDK_VERSION}/source.properties"
+
 # 路径与缓存目录：工作流会优先探测这些（/opt/dev/flutter 等），探测到就不下载
 ENV JAVA_HOME=/opt/dev/jdk \
     ANDROID_SDK_ROOT=/opt/dev/android-sdk \

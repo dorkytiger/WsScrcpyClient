@@ -334,6 +334,19 @@ jobs:
             echo "★ 发现 $SDK/cmdline-tools —— 它的 sdkmanager 会让 Flutter 去装 NDK 并撞 dl.google.com，删掉"
             rm -rf "$SDK/cmdline-tools" || echo "（删不掉，可能是只读挂载；请手动 rm -rf）"
           fi
+          # ★ NDK 标记（不是真 NDK）：Flutter 的 gradle 插件强制 AGP 拿 NDK，而它判断"已装"
+          #   只看 `$SDK/ndk/<版本>/source.properties` 存不存在（flutter_tools/lib/src/android/
+          #   gradle.dart 的 _getInstalledNdkVersionsForGradle，内容都不读）。没有这个标记时
+          #   实测报 `NDK not configured. Download it with SDK manager.`。项目无原生代码，不需要真 NDK。
+          FLUTTER_ROOT_DIR="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")"
+          NDK_VERSION="$(sed -n 's/.*ndkVersion: String = "\([^"]*\)".*/\1/p' \
+            "$FLUTTER_ROOT_DIR/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt" | head -1)"
+          NDK_VERSION="${NDK_VERSION:-28.2.13676358}"
+          mkdir -p "$SDK/ndk/$NDK_VERSION"
+          printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
+            > "$SDK/ndk/$NDK_VERSION/source.properties"
+          echo "已放 NDK 标记：$SDK/ndk/$NDK_VERSION/source.properties（无原生代码，真 NDK 不需要）"
+
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           du -sh "$SDK"

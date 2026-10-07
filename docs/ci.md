@@ -270,6 +270,43 @@ Error: Failed to download from https://dl.google.com/android/cli/latest/linux_x8
 
 > 相关：如果哪天真的需要 NDK，得把 NDK 的 zip 也从镜像下好放进 SDK（同理绕开 dl.google.com）。
 
+#### ★ 第六个坑（2026-10-07 实测）：`NDK not configured. Download it with SDK manager.`
+
+去掉 `cmdline-tools` 之后，构建走到 `assembleRelease` 时报：
+
+```
+> A problem occurred configuring project ':app'.
+   > NDK not configured. Download it with SDK manager. Preferred NDK version is '28.2.13676358'.
+```
+
+**链条**（代码证据）：
+
+1. Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` **总是**想让 AGP 拿到 NDK
+   （目的：让带原生代码的插件能构建）；
+2. 它先看"配置的 NDK 版本在不在已安装列表里"，不在就调 `sdkmanager` 装 —— 我们没有
+   `cmdline-tools`（第五个坑故意去掉的），于是退到"合成 external native build"兜底：
+   它**故意让 AGP 以为项目需要 NDK** → AGP 反过来报 `NDK not configured` ✗；
+3. 而"已安装"的判定极宽松 ——
+   `flutter_tools/lib/src/android/gradle.dart` 的 `_getInstalledNdkVersionsForGradle()`：
+   只 `list` 一下 `$SDK/ndk/`，**检查每个版本目录下有没有 `source.properties`（内容都不读）**。
+
+**修法：放一个 NDK 标记文件（1 个字节，不用下 1GB 的真 NDK）**
+
+```bash
+NDK_VERSION=28.2.13676358        # 取自 Flutter 的 FlutterExtension.kt（ndkVersion）
+mkdir -p "$SDK/ndk/$NDK_VERSION"
+printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
+  > "$SDK/ndk/$NDK_VERSION/source.properties"
+```
+
+有了它 → 该版本被认为"已装" → `forceNdkDownload` 直接 `return@finalizeDsl` →
+既不调 sdkmanager、也不配合成 externalNativeBuild → AGP 不再要 NDK ✓。
+`tools/ci/Dockerfile`、`tools/prepare_ci_host.sh`、工作流的 SDK 步骤里都放了
+（版本是从 Flutter SDK 的 `FlutterExtension.kt` 里现读的，升级 Flutter 后自动跟上）。
+
+> ⚠️ **以后加了带原生代码（NDK）的插件，就必须换成真 NDK**：把
+> `android-ndk-r<xx>-linux.zip` 解到 `$SDK/ndk/<版本>/`。标记文件只是"项目没有原生代码"的取巧。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**

@@ -108,6 +108,14 @@ printf '%s\n' \
 printf '%s\n' 84831b9409646a918e30573bab4c9c91346d8abd > "$SDK_DIR/licenses/android-sdk-preview-license"
 echo "    ✓ 许可文件已写"
 
+# NDK 标记（不是真 NDK，见 tools/ci/Dockerfile 里的说明）
+NDK_VERSION="$(sed -n 's/.*ndkVersion: String = "\([^"]*\)".*/\1/p' \
+  "$FLUTTER_DIR/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt" | head -1)"
+NDK_VERSION="${NDK_VERSION:-28.2.13676358}"
+mkdir -p "$SDK_DIR/ndk/$NDK_VERSION"
+printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" > "$SDK_DIR/ndk/$NDK_VERSION/source.properties"
+echo "    ✓ NDK 标记：$SDK_DIR/ndk/$NDK_VERSION/source.properties"
+
 # ── 3. 汇总 ─────────────────────────────────────────────────────────────
 say "准备好啦 —— 各目录大小"
 du -sh "$FLUTTER_DIR" "$JDK_DIR" "$SDK_DIR" "$DEV_DIR/gradle-home" "$DEV_DIR/pub-cache"
