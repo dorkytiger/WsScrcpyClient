@@ -99,7 +99,9 @@ jobs:
           else
             echo "✗ 挂载里没有 flutter —— 会回退到下载（检查 dind 的 volume 与 container.options）"
           fi
-          if mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
+          # ★ 必须先判断 $CI_HOST_DIR **本来就存在**（= 挂载生效）：只 mkdir 的话，
+          #   没挂载时容器里也能凭空建出 /opt/dev（root 可写），于是会误报"缓存走挂载目录"。
+          if [ -d "$CI_HOST_DIR" ] && mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
             echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
             echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
             echo "缓存走挂载目录：$CI_HOST_DIR"
