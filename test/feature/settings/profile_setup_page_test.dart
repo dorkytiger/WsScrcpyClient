@@ -76,7 +76,7 @@ void main() {
       find.byType(TextField).first,
       'https://android.dorkytiger.top/',
     );
-    await tester.enterText(find.byType(TextField).at(1), 'u758272094');
+    await tester.enterText(find.byType(TextField).at(1), 'u');
     await tester.enterText(find.byType(TextField).at(2), 'secret');
     await tester.tap(find.text('保存并继续'));
     await tester.pumpAndSettle();
@@ -85,7 +85,7 @@ void main() {
     final profiles = await context.service.listProfiles();
     expect(profiles.data, hasLength(1));
     expect(profiles.data!.single.isActive, isTrue);
-    expect(profiles.data!.single.username, 'u758272094');
+    expect(profiles.data!.single.username, 'u');
     // 密码明文落在 connection_profiles.password（2026-10-07 去掉了 flutter_secure_storage）。
     final rows = await context.database
         .select(context.database.connectionProfiles)
