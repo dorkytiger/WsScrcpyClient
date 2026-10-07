@@ -305,6 +305,57 @@ class StreamSessionService {
   static const int webPlayerPreferredMaxFps = 60;
   static const int webPlayerPreferredIFrameInterval = 10;
 
+  // ---------------------------------------------------------------------------
+  // 低延迟优先（可选，默认关；见 AGENTS §16.5）
+  // ---------------------------------------------------------------------------
+
+  /// 低延迟优先：把 `maxFps` 抬到不低于 [lowLatencyMaxFps]、
+  /// 把 `iFrameInterval` 收到不超过 [lowLatencyIFrameInterval] 秒。
+  ///
+  /// **它治的是哪两段延迟**（都是"设备侧节奏"，客户端唯一能施加影响的地方）：
+  /// 1. `maxFps`：设备只在"屏上有变化"时发帧，帧率上限直接决定**帧量化**——
+  ///    24fps 是 41.7ms 一帧（平均多等 ~21ms），60fps 是 16.7ms（平均 ~8ms）；
+  ///    内网带宽不要钱，所以把上限抬上去是纯赚（网页端自己用的就是 60）。
+  /// 2. `iFrameInterval`：编码器**重建**（转屏、改画质档、拖窗）之后要等一个新的 IDR
+  ///    才有整幅画面，最坏等满这个间隔。服务端给 5~10 秒时，用户看到的就是
+  ///    "卡了几十秒"（§16.2.1 的原话）；收到 2 秒让恢复时间进到 1 个数量级以内。
+  ///    代价是 IDR 变密（关键帧比 P 帧大得多），带宽换响应。
+  ///
+  /// 为什么是开关而不是默认值：这两项都在**动设备编码器**，而设备是容器里的软编码器
+  /// （§12.7 那次"卡成幻灯片"就是让它多干活导致的）。默认关 = 行为与改动前一致；
+  /// 打开后如果吞吐/延迟反而变差，关掉即可，不用回滚版本。
+  bool get lowLatencyPreferred => _lowLatencyPreferred;
+  bool _lowLatencyPreferred = false;
+
+  static const int lowLatencyMaxFps = 60;
+  static const int lowLatencyIFrameInterval = 2;
+
+  /// 切换"低延迟优先"：**立刻**补发一条参数（用户点了就要马上生效），
+  /// 套路与 [setBoundsMode] 完全一致（切换时视口尺寸没变，必须清掉去重记录）。
+  Result<void> setLowLatencyPreferred(bool value) {
+    if (_lowLatencyPreferred == value) {
+      return successVoid();
+    }
+    _lowLatencyPreferred = value;
+    _log(
+      value
+          ? '低延迟优先：开（要 maxFps≥$lowLatencyMaxFps、iFrameInterval≤'
+                '$lowLatencyIFrameInterval 秒；代价是关键帧变密、带宽变大）'
+          : '低延迟优先：关（回到服务端给的编码参数）',
+    );
+    final bounds = _reportedViewportBounds;
+    if (!_settingsSentForCurrentConnection || bounds == null) {
+      // 还没发过首发：下一次首发自然会带上这个开关，不需要现在发。
+      return successVoid();
+    }
+    _lastViewportBounds = null;
+    final result = applyViewportBounds(
+      width: bounds.width,
+      height: bounds.height,
+    );
+    return result.isError ? failureVoid(result.error!) : successVoid();
+  }
+
   /// 画质档位（默认 [VideoBoundsMode.balanced]；见该枚举的注释）。
   VideoBoundsMode get boundsMode => _boundsMode;
   // 服务层默认最保守（不向设备要放大）；App 层会在 connect 时按
@@ -346,6 +397,12 @@ class StreamSessionService {
   /// 才能说清"画面为什么糊"（本地放大倍率 = 控件物理像素 / 视频像素）。
   VideoSize? get lastEffectiveBounds => _lastEffectiveBounds;
   VideoSize? _lastEffectiveBounds;
+
+  /// 最近一次**真正发出去**的视频参数（含低延迟优先的收紧结果）；没发过时为 null。
+  ///
+  /// 面板里"低延迟优先：已要 maxFps=60、关键帧间隔=2 秒"这一行就读它 ——
+  /// 用户点了开关要能立刻确认"发出去的到底是什么"，而不是只看开关状态（§16.3 的教训）。
+  VideoSettings? get lastSentVideoSettings => _videoSettings;
 
   /// 模拟一次按键（down + up），快捷栏的 Home/Back/Recents/音量都用它。
   Result<void> pressKey(int keyCode) {
@@ -809,9 +866,31 @@ class StreamSessionService {
         _videoSettings ??
         fallbackVideoSettings(display.displayInfo.displayId);
     final baseWithDefaults = withWebPlayerPreferredDefaults(base);
+    // 低延迟优先（可选）：只**收紧**这两个字段，绝不放松 ——
+    //   maxFps：服务端给的比 60 高就听服务端的；
+    //   iFrameInterval：服务端给的比 2 秒短就听服务端的。
+    final tuned = !_lowLatencyPreferred
+        ? baseWithDefaults
+        : baseWithDefaults.copyWith(
+            maxFps: baseWithDefaults.maxFps >= lowLatencyMaxFps
+                ? baseWithDefaults.maxFps
+                : lowLatencyMaxFps,
+            iFrameInterval:
+                baseWithDefaults.iFrameInterval > 0 &&
+                    baseWithDefaults.iFrameInterval <= lowLatencyIFrameInterval
+                ? baseWithDefaults.iFrameInterval
+                : lowLatencyIFrameInterval,
+          );
+    if (_lowLatencyPreferred && tuned != baseWithDefaults) {
+      _log(
+        '低延迟优先生效：maxFps ${baseWithDefaults.maxFps} → ${tuned.maxFps}，'
+        'iFrameInterval ${baseWithDefaults.iFrameInterval} → ${tuned.iFrameInterval}'
+        '（代价：关键帧变密、带宽变大；关掉开关即回到服务端值）',
+      );
+    }
     // 关键：**绝不要求放大**。尺寸无论来自 UI 视口，还是服务端自己给的那份
     // （夹具里服务端给的是 1856x960，同样大于原生 1280x720），都收敛到原生范围内。
-    final requestedBounds = bounds ?? baseWithDefaults.bounds;
+    final requestedBounds = bounds ?? tuned.bounds;
     final effectiveBounds = requestedBounds == null
         ? null
         : clampBoundsForMode(
@@ -827,7 +906,7 @@ class StreamSessionService {
         '上限 ${_boundsMode.upscaleLabel} + 与设备同比例 + 16 宏块对齐，见 AGENTS §16.3）',
       );
     }
-    final normalized = baseWithDefaults.copyWith(
+    final normalized = tuned.copyWith(
       displayId: display.displayInfo.displayId,
       // 只在有 UI 视口尺寸时覆盖；没有就沿用服务端给的值（不再写 null）。
       bounds: effectiveBounds,

@@ -498,6 +498,33 @@ class PlayerViewModel extends ChangeNotifier {
     _notify();
   }
 
+  /// 低延迟优先（默认关；见 [StreamSessionService.setLowLatencyPreferred]）。
+  bool get lowLatencyPreferred => _sessionService.lowLatencyPreferred;
+
+  /// 面板里给"低延迟优先"那一行看的实测摘要。
+  String get latencySummary {
+    if (!lowLatencyPreferred) {
+      return '关（回显服务端给的帧率与关键帧间隔）';
+    }
+    final settings = _sessionService.lastSentVideoSettings;
+    return '开：已要 maxFps=${settings?.maxFps ?? '—'}、'
+        '关键帧间隔=${settings?.iFrameInterval ?? '—'} 秒';
+  }
+
+  /// 切换"低延迟优先"：**会动设备编码器**，所以立刻补发一条参数
+  /// （与 [setBoundsMode] 一样，切换后画面可能短暂停一下 —— 编码器要重建）。
+  void setLowLatencyPreferred(bool value) {
+    if (_sessionService.lowLatencyPreferred == value) {
+      return;
+    }
+    final result = _sessionService.setLowLatencyPreferred(value);
+    if (result.isError) {
+      _logs.add('切换低延迟优先失败：${result.error!.message}');
+    }
+    _maybeLogRenderDiagnostics();
+    _notify();
+  }
+
   /// web 专用：把画面几何交给解码器（原生是空实现，见 [VideoDecoder.applyDisplayGeometry]）。
   ///
   /// 只有 web 的 canvas 平台视图需要——那边不能靠 `FittedBox` 缩放 DOM 元素，

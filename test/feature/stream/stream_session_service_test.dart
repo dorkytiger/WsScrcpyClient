@@ -7,6 +7,7 @@ import 'package:ws_scrcpy_client/core/control/control_message_type.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
+import 'package:ws_scrcpy_client/core/stream/stream_initial_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
 import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
@@ -101,6 +102,105 @@ void main() {
   /// 从 CHANGE_STREAM_PARAMETERS 帧里解出视频参数（首字节是 type，其后是参数结构）。
   VideoSettings settingsOf(Uint8List frame) =>
       VideoSettings.fromBuffer(Uint8List.sublistView(frame, 1));
+
+  /// 把夹具里服务端给的 `maxFps` 换成别的值（模拟真实服务端给低帧率的那次初始头：
+  /// 2026-10-08 20:22 实测给的是 `maxFps 24 / iFrameInterval 5`，而夹具里是 60）。
+  ///
+  /// 做法：在夹具里扫"4 字节大端 == 原 maxFps"的位置，逐个候选改掉后**用真实解析器复核**：
+  /// 只有"解析成功、maxFps 正好变成目标值、其余字段一字不变"的那一处算命中。
+  /// 这样测试里不必复制一份协议布局（唯一来源仍是 [StreamInitialInfo.parse]）。
+  Uint8List initialInfoWithMaxFps(int maxFps) {
+    final original = loadInitialInfoFixture();
+    // 夹具里有不止一个 display，服务层用的是第一个（与解析层测试一致）。
+    final before = StreamInitialInfo.parse(
+      original,
+    ).displays.first.videoSettings!;
+    if (before.maxFps == maxFps) {
+      return original;
+    }
+    for (var offset = 0; offset + 4 <= original.length; offset++) {
+      final patched = Uint8List.fromList(original);
+      ByteData.sublistView(patched).setInt32(offset, maxFps, Endian.big);
+      try {
+        final after = StreamInitialInfo.parse(
+          patched,
+        ).displays.first.videoSettings!;
+        if (after.maxFps == maxFps &&
+            after.bitrate == before.bitrate &&
+            after.iFrameInterval == before.iFrameInterval &&
+            after.displayId == before.displayId &&
+            after.bounds == before.bounds) {
+          return patched;
+        }
+      } on GlobalException {
+        // 这个位置不是 maxFps 字段（改坏了解析）——继续找。
+      }
+    }
+    throw StateError('夹具里没找到 maxFps 字段（夹具被换过了？）');
+  }
+
+  test('★ 低延迟优先：把设备侧帧率抬上去、关键帧间隔收下来，且立刻补发一条', () async {
+    await service.start(target);
+    // 服务端给 maxFps 24 / iFrameInterval 10（真实出现过的那组）：两个方向都覆盖
+    // —— maxFps 要**抬**到 60，iFrameInterval 要**收**到 2。
+    transport.emit(initialInfoWithMaxFps(24));
+    await pumpEventQueue();
+    // UI 视口尺寸要**先报过**：开关的"立刻补发"和 setBoundsMode 一样，是按当前视口重算的
+    // （真实路径上用户能点到这个开关时，页面早就报过尺寸了）。
+    service.applyViewportBounds(width: 1898, height: 853);
+
+    final before = settingsOf(
+      framesOfType(ControlMessageType.changeStreamParameters.code).single,
+    );
+    expect(before.maxFps, 24, reason: '夹具已被改成低帧率那组');
+    expect(before.iFrameInterval, 10);
+    expect(service.lowLatencyPreferred, isFalse, reason: '默认必须是关的');
+
+    // 打开：必须**立刻**补发一条（用户点了就要马上生效；套路同 setBoundsMode）。
+    final on = service.setLowLatencyPreferred(true);
+    expect(on.isSuccess, isTrue);
+    var frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    expect(frames, hasLength(2), reason: '打开开关必须马上补发一条');
+    final tuned = settingsOf(frames.last);
+    expect(tuned.maxFps, StreamSessionService.lowLatencyMaxFps);
+    expect(tuned.iFrameInterval, StreamSessionService.lowLatencyIFrameInterval);
+    // 其余字段一个都不能动（回显服务端值的纪律，§6.2 的反馈循环教训）。
+    expect(tuned.bitrate, before.bitrate);
+    expect(tuned.bounds, before.bounds);
+    expect(tuned.sendFrameMeta, isFalse);
+
+    // 关掉：回到服务端给的值，也要立刻补发。
+    expect(service.setLowLatencyPreferred(false).isSuccess, isTrue);
+    frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    expect(frames, hasLength(3));
+    final restored = settingsOf(frames.last);
+    expect(restored.maxFps, 24);
+    expect(restored.iFrameInterval, 10);
+
+    // 幂等：状态没变就一条都不发（否则服务端会白重建一次编码器）。
+    expect(service.setLowLatencyPreferred(false).isSuccess, isTrue);
+    expect(
+      framesOfType(ControlMessageType.changeStreamParameters.code),
+      hasLength(3),
+    );
+  });
+
+  test('★ 低延迟优先只"收紧"不"放松"：服务端已经给 60fps 时不动帧率', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture()); // 夹具：maxFps 60 / iFrameInterval 10
+    await pumpEventQueue();
+    service.applyViewportBounds(width: 1898, height: 853);
+
+    service.setLowLatencyPreferred(true);
+    final frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    final tuned = settingsOf(frames.last);
+    expect(tuned.maxFps, 60, reason: '服务端给的 60 不比我们要的低，不该被改');
+    expect(
+      tuned.iFrameInterval,
+      StreamSessionService.lowLatencyIFrameInterval,
+      reason: '服务端给的 10 秒太长，要收到 2 秒',
+    );
+  });
 
   test('初始信息头 → 解析出设备与分辨率，并下发一次视频参数', () async {
     await service.start(target);

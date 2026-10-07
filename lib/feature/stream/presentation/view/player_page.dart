@@ -1046,6 +1046,27 @@ class _MoreActionsSheet extends StatelessWidget {
               ),
             ),
             const Divider(height: 1),
+            // 低延迟优先（默认关）：把设备侧的**帧率上限**与**关键帧间隔**收紧。
+            // 这一行和"画质"一样会真的改设备编码参数，所以也放在同一块、并显示实测值。
+            // 依据与代价见 StreamSessionService.setLowLatencyPreferred / AGENTS §16.5。
+            ListenableBuilder(
+              listenable: viewModel,
+              builder: (BuildContext context, _) => SwitchListTile(
+                value: viewModel.lowLatencyPreferred,
+                onChanged: viewModel.setLowLatencyPreferred,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.lg,
+                ),
+                title: const Text('低延迟优先'),
+                subtitle: Text(
+                  '把帧率上限抬到 60、关键帧间隔收到 2 秒：'
+                  '帧更密（每帧少等十几毫秒）、编码器重建后最多等 2 秒就有画面。\n'
+                  '${viewModel.latencySummary}',
+                ),
+                isThreeLine: true,
+              ),
+            ),
+            const Divider(height: 1),
             // 画质档位（三档下拉）：网页端之所以看着更清楚，是因为它把**浏览器视口尺寸**
             // 当编码边界发过去，而我们原来一律封顶到设备原生（§12.7 是为了不许设备多编像素）。
             // 但"一个清晰优先开关"在不少设备上两档会算出同一个边界（用户实测"切了没变化"），

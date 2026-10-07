@@ -336,6 +336,45 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('"更多"面板里有"低延迟优先"开关，默认关且能打开（会真的改设备编码参数）', (
+    WidgetTester tester,
+  ) async {
+    landscapePhone(tester);
+    final transport = _FakeTransport();
+    final viewModel = await pumpPlayer(tester, transport);
+
+    await tester.tap(find.text('更多'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final switchFinder = find.ancestor(
+      of: find.text('低延迟优先'),
+      matching: find.byType(SwitchListTile),
+    );
+    expect(switchFinder, findsOneWidget);
+    expect(
+      tester.widget<SwitchListTile>(switchFinder).value,
+      isFalse,
+      reason: '默认必须关：这两项都在动设备编码器，没在真机上验过就不能默认开',
+    );
+
+    await tester.tap(switchFinder);
+    await tester.pump();
+    expect(viewModel.lowLatencyPreferred, isTrue);
+    // 摘要要能自证"发出去的到底是什么"（§16.3 的教训：点了看不见变化等于没生效）。
+    expect(find.textContaining('已要 maxFps='), findsOneWidget);
+    // 同上：等视口防抖计时器跑完，否则 teardown 会报 "A Timer is still pending"。
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+
+    // 关掉也要能回到原状（回退路径必须存在，用户"实在不行就关掉"）。
+    await tester.tap(switchFinder);
+    await tester.pump();
+    expect(viewModel.lowLatencyPreferred, isFalse);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('★ 横屏手机尺寸下：画面占位不溢出', (WidgetTester tester) async {
     landscapePhone(tester);
     final transport = _FakeTransport();
