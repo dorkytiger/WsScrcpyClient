@@ -16,7 +16,7 @@
 | 查**输入（触摸/键盘/滚轮）** 的坑 | 本文件 §9.1（黑边丢 UP 把设备端手指卡住）、§10 |
 | 改 **web 端**（含"连上没画面"） | 本文件 §9.3（平台约束）+ §17（WebCodecs 实现与两个坑） |
 | 看**怎么构建 / 打包 / CI** | `docs/ci.md`、本文件 §3 |
-| 看某个平台**当初为什么这么选** | `docs/platform-feasibility.md` |
+| 给 iOS / macOS **签名、公证、上架**（还没做的那部分） | `docs/apple-distribution.md` |
 | 复现 Windows 那轮"崩溃/黑屏"的完整证据链 | `docs/windows-decoder-history.md` |
 
 **本文件的纪律**：只写"实测过的结论 + 为什么"；每条结论都要带证据（日志、夹具、探针、测试）。
@@ -92,7 +92,7 @@ web 端还没上真机复验过**触摸**（`pointer-events:none` 那条只在�
 | 平台 | 解码器 | 必须做的事 | 不做的后果 |
 |---|---|---|---|
 | **Windows** | Media Foundation H.264 解码器 MFT | 创建后、开始流**之前**：`IMFAttributes::SetUINT32(MF_LOW_LATENCY, TRUE)` | **默认缓冲约 1.2 秒（30fps ≈ 38 帧）才吐第一张图**：画面静止时服务端只给二十来帧 → **永远黑屏**；编码器一重建就再攒一批 → **隔几秒卡一下然后一次性追平** |
-| **macOS / iOS** | VideoToolbox（`VTDecompressionSession`） | **`kVTDecompressionPropertyKey_RealTime = true`**。**不要**顺手设 `kVTDecompressionPropertyKey_MaximizePowerEfficiency`——头文件原文写着"两者同设是未定义行为"，而它默认就是 false，不设才对（可行性文档 §3.1.4 那条建议与头文件冲突，已纠正）。 | **实测（iOS 2026-10-02）：Apple 侧没有 Windows 那种缓冲**——`RealTime` 默认就是 true，探针跑 true / false / 完全不设三种都是 90/90 帧全解（`tools/run_vt_replay_probe.sh`）。但仍要显式设一次并记返回码，日志里能自证 |
+| **macOS / iOS** | VideoToolbox（`VTDecompressionSession`） | **`kVTDecompressionPropertyKey_RealTime = true`**。**不要**顺手设 `kVTDecompressionPropertyKey_MaximizePowerEfficiency`——头文件原文写着"两者同设是未定义行为"，而它默认就是 false，不设才对（那条"建议同设"的旧结论与头文件冲突，已纠正）。 | **实测（iOS 2026-10-02）：Apple 侧没有 Windows 那种缓冲**——`RealTime` 默认就是 true，探针跑 true / false / 完全不设三种都是 90/90 帧全解（`tools/run_vt_replay_probe.sh`）。但仍要显式设一次并记返回码，日志里能自证 |
 | Android（已实现） | `MediaCodec` | 已经是实时模式（SurfaceProducer），**无需改** | — |
 
 **判断方法（不依赖肉眼）**：看心跳里 `已发布 / 已喂入` 的比例。
@@ -1294,7 +1294,7 @@ VideoToolbox 的 H.264 输入按 **AVCC（4 字节大端长度前缀）** 解释
    `tools/run_vt_replay_probe.sh` 里专门有一条这条的断言（4 字节 → NAL 始于偏移 4）；
 2. **`CMBlockBufferCreateWithMemoryBlock(memoryBlock: nil)` 之后必须先 `CMBlockBufferAssureBlockMemory`**
    再 `CMBlockBufferReplaceDataBytes`（块内存是懒分配的）。漏了这步会静默失败、一帧都出不来。
-   可行性文档 §3.1.3 的示例没有这一步；
+   常见的网上示例没有这一步；
 3. **`CMSampleBufferCreateReady` 的 `sampleSizeArray` 给整段 AVCC 长度**（一条消息里多个 NAL
    就是**一个** sample，不需要一个 NAL 一个 sample）。
 
@@ -1321,7 +1321,7 @@ VideoToolbox 的 H.264 输入按 **AVCC（4 字节大端长度前缀）** 解释
 
 **注销必须用注册时那一个注册表**（handler 里存 `resolvedTextureRegistry`），否则注销不掉。
 
-**教训**：这条不在可行性文档的预判里——文档只把"`textures` 属性名与类型"标成 ⚠️需实测。
+**教训**：这条不在当初的预判里——那时只把"`textures` 属性名与类型"标成了 ⚠️需实测。
 **"未实现的平台能力"往往不是编译不过，而是返回 0 静默失败**，所以两个候选来源都要试、
 试完要打日志。
 
@@ -1377,13 +1377,14 @@ VideoToolbox 的 H.264 输入按 **AVCC（4 字节大端长度前缀）** 解释
   所以 `brew install cocoapods` 是**硬前置**（没装时 `flutter build ios` 直接以
   `CocoaPods not installed or not in valid state` 结束，报错信息里那句
   "The following plugins do not support Swift Package Manager" 才是真正原因）。
-- **`Info.plist` 已加**（按可行性文档 §4.2 的清单）：
+- **`Info.plist` 已加**（清单与"为什么"见 [`docs/apple-distribution.md`](docs/apple-distribution.md) §0）：
   `NSAppTransportSecurity.NSAllowsLocalNetworking`（局域网明文 `ws://<设备IPv4>:8886` 要它，
   比 `NSAllowsArbitraryLoads` 安全得多）、`NSLocalNetworkUsageDescription`、
   `ITSAppUsesNonExemptEncryption=false`。
   ⚠️ 这两条**都还没在真机上实测**（模拟器上公网 `wss://` 用不到它们）。
 - **还没做**：真机签名 / provisioning；App Store 审核那套（远程控制类 §4.2.7，
-  可行性文档 §4.2c 有对策）；应用标识仍是 `com.example`。
+  对策见 [`docs/apple-distribution.md`](docs/apple-distribution.md) §2.3）；
+  应用标识仍是 `com.example`。
 - **真机验收清单**（照 §1.2 的路子，别信日志）：
   ① 起手先看 `低延迟模式：kVTDecompressionPropertyKey_RealTime=true 设置结果=0x00000000`；
   ② `纹理注册成功：来源=…`（真机上若 `引擎 applicationRegistrar` 这条就能成，说明模拟器那个坑

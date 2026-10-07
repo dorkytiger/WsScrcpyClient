@@ -102,11 +102,17 @@ schtasks /Run /TN "forgejo-runner"
 
 5. 最后在仓库 **Settings → Actions → Variables** 里加变量 `WINDOWS_RUNNER=true`，`windows` job 才会被派发。
 
+> **★ 现状缺口：`web` 还没有 CI job。**
+> 五端里 web 是唯一"编译不过不会有人提醒你"的目标。本机命令是
+> `tools/build_web.sh`（带 `--no-web-resources-cdn`），加一个 job 只需要
+> `flutter build web --release` 那一行 —— 但它还没加，**别以为 CI 绿了就说明 web 没坏**。
+
 ## 3. 工作流做了什么
 
 | job | runner | 作用 | 产物 |
 |---|---|---|---|
 | `verify` | `ubuntu-latest` | `pub get` → `dart analyze lib test tools` → `flutter test` | 无（门禁） |
+| ~~`web`~~ | — | **还没加**（见本节开头的缺口说明） | — |
 | `android` | `ubuntu-latest` | 装 JDK17 + Flutter + Android SDK → `flutter build apk --release` | `android-apk`：`ws_scrcpy_client-<版本>.apk` |
 | `windows` | `windows`（需变量开启） | 取原生依赖 → `flutter build windows --release` → zip | `windows-x64`：`ws_scrcpy_client-<版本>-windows-x64.zip` |
 

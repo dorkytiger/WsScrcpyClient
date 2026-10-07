@@ -71,7 +71,7 @@ struct VtReplayProbe {
         section("1. Annex-B 切分与 AVCC 转换")
 
         // 4 字节起始码：必须从偏移 4 开始拿到 NAL，且类型是 5（IDR）。
-        // 这条专治"先判 3 字节"的经典错位 bug（可行性文档 §3.1.2 提醒过）。
+        // 这条专治"先判 3 字节"的经典错位 bug（起始码长度不固定，见 AGENTS §15.2）。
         let fourByte: [UInt8] = [0, 0, 0, 1, 0x65, 0x88, 0x84]
         let fourUnits = ScrcpyVideoDecoder.splitNALUnits(fourByte)
         expectEqual(fourUnits.count, 1, "4 字节起始码应切出 1 个 NAL")
