@@ -342,7 +342,8 @@ jobs:
         run: ls -lh dist
 
       - name: 建 Release 并附上产物
-        uses: softprops/action-gh-release@v1
+        # v1 跑在 GitHub 已弃用的 Node 上，现在容易直接失败；v2 是当前主线。
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
