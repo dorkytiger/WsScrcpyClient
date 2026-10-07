@@ -341,6 +341,33 @@ Kotlin 2.4.0 都实测 200）。三个时机都要挂：`settingsEvaluated`（pl
 
 安装位置：`$GRADLE_USER_HOME/init.d/10-china-mirrors.gradle`（CI 从检出里拷、镜像里也烤了一份）。
 
+**★ 补丁（同一天马上就踩到）：init script 不能无脑往 project 级 `repositories` 加仓库。**
+
+Flutter 自己的 gradle 插件构建（`includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")`）
+在它的 `settings.gradle.kts` 里设了：
+
+```kotlin
+repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+```
+
+往那种 build 的 project 级仓库里加东西，会在**解析阶段**直接失败：
+
+```
+Error resolving plugin [id: 'dev.flutter.flutter-plugin-loader', version: '1.0.0']
+> Build was configured to prefer settings repositories over project repositories
+  but repository 'maven' was added by settings file 'settings.gradle.kts'
+```
+
+所以 init script 现在按**每个 build 的 `repositoriesMode`** 分流：
+
+| 层级 | 是否改 |
+|---|---|
+| `settings.pluginManagement.repositories` | ✅ 总是改 |
+| `settings.buildscript.repositories` | ✅ 总是改 |
+| `settings.dependencyResolutionManagement.repositories` | ✅ 总是改（有才碰） |
+| project 的 `buildscript.repositories` | ✅ 总是改（buildscript 解析不受该模式管辖 —— 这正是修复 `:flutter_secure_storage` 的那条路） |
+| project 的 `repositories` | ⚠️ **只在该 build 不是 `FAIL_ON_PROJECT_REPOS` 时改**（我们的 app build 是默认的 `PREFER_PROJECT`；Flutter 的 `resolve_dependencies.gradle.kts` 就是在 project 级加 `google()` 的） |
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
