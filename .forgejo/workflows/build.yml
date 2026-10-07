@@ -91,6 +91,14 @@ jobs:
       - name: 缓存目录（挂载可用时，Gradle/pub 依赖也不用每次重下）
         run: |
           set -e
+          # 先把"挂载到底有没有生效"打到日志里 —— 排查这类问题不该靠猜（见 docs/ci.md §2.4）
+          echo "CI_HOST_DIR=$CI_HOST_DIR"
+          ls -la "$CI_HOST_DIR" 2>&1 | head -12 || true
+          if [ -x "$CI_HOST_DIR/flutter/bin/flutter" ]; then
+            echo "✓ 挂载里能找到 $CI_HOST_DIR/flutter"
+          else
+            echo "✗ 挂载里没有 flutter —— 会回退到下载（检查 dind 的 volume 与 container.options）"
+          fi
           if mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
             echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
             echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
