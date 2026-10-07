@@ -24,7 +24,9 @@ ws-scrcpy 的**多端显示/操作客户端**（Flutter）。需求与里程碑�
 - ✅ M2 路线 A：**iOS / macOS** 原生硬解（VideoToolbox `VTDecompressionSession` → `CVPixelBuffer` →
   `FlutterTexture`；两端**共用同一份** `darwin/ScrcpyVideo*.swift`）。
   两端都已实跑并**自己截图确认画面上屏**（iOS 模拟器 2026-10-02；macOS 本机同日、用户也验过），见 **§15**
-- ⏳ M2 路线 A：Linux 原生解码
+- ✅ M2 路线 A：**web 端**（浏览器 WebCodecs `VideoDecoder` → canvas 平台视图；
+  与原生三端共用同一个 `VideoDecoder` 接口与协议层）。**2026-10-07 用户实测出画面**，见 **§17**
+- ⏳ M2 路线 A：Linux 原生解码（唯一还没通的端）
 - ⏳ M3 余项：剪贴板同步、软键盘文本注入、双指缩放等手势增强
 
 ### 1.1 交接：当前状态与下一步（新会话从这里读起）
@@ -46,9 +48,14 @@ Android 端同样可用（MediaCodec 路线）。真机日志验证过 `已发�
 **上屏问题必须自己截图确认**；② 排查要有"自己的眼睛和手"：`WS_SCRCPY_AUTOSTART=1` 自动投流 +
 运行中可读的日志/抓包，让我能自己复现，不必让用户反复当测试机。
 
-**已知未做**：Linux 原生解码；**iOS 只在模拟器上验证过、还没上真机**（要过签名，见 §15.6）；
+**2026-10-07 收尾状态**：**Android / Windows / iOS / macOS / web 五端都能出画面 + 操作**，
+只剩 Linux 没有原生解码。这一天修掉的四类问题都记在 §16（清晰度/码率、转屏与拖窗刷爆编码器、
+macOS 钥匙串）与 §17（web 端解码上屏，含"全黑无提示"与 `Decoder failure` 两个坑）。
+
+**已知未做**：**Linux** 原生解码；**iOS 只在模拟器上验证过、还没上真机**（要过签名，见 §15.6）；
 剪贴板同步、软键盘文本注入、双指缩放；
-`sendFrameMeta=true` 未验证；应用标识仍是 `com.example`。
+`sendFrameMeta=true` 未验证；应用标识仍是 `com.example`；
+web 端还没上真机复验过**触摸**（`pointer-events:none` 那条只在架构上成立，见 §17.4）。
 
 **这个仓库以前没有 git**（`fatal: not a git repository`）：2026-10-01 已 `git init` 并做首次提交
 （根 `.gitignore` 已补齐 `build/`、`.tmp/`、`.probe/`、`capture.bin`、日志、各平台 `ephemeral/` 等）。
@@ -347,7 +354,7 @@ feature 之间**不互相 import presentation/data**。
 排查顺序：先查自己的请求时序，再看服务端；判断"有没有流"要看**单位时间收到的字节数**，
 只看"有没有视频帧"会被循环刷包骗过。详见 `docs/ws-scrcpy-protocol.md` §6.2。
 
-**待做**：**Linux** 的原生解码（Windows / Android / iOS / macOS 都已跑通）；
+**待做**：**Linux** 的原生解码（Android / Windows / iOS / macOS / **web** 都已跑通）；
 **iOS 只在模拟器上验证过，还没上真机**（真机要过签名，见 §15.6）；
 M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TYPE_TEXT`、双指缩放等手势）；
 `sendFrameMeta=true` 时每帧前 12 字节帧信息未验证（改走 fMP4 重封装才需要）；
@@ -1830,7 +1837,19 @@ t.prototype.decode = function (e) {
 **回归测试**：`h264_annex_b_test.dart` → `★ 参数集必须拼在关键帧前面…`（含"帧里已带参数集
 → 不重复拼"、"没有参数集 → 原样返回"）。**这一条是纯函数 + 真实夹具，所以离线可验证。**
 
-### 17.7 还没做的（下次接着做）
+### 17.7 ★ 2026-10-07 用户确认：web 端**出画面了**
+
+四次修完之后用户实测通过（原话"完美"）：`补喂缓冲` → `参数集拼进关键帧样本` 两步是决定性的。
+以后 web 端出问题，按这个顺序查（每一步都有日志）：
+`WS 帧吞吐/s：收到 +N`（帧到了吗）→ `[WebCodecs] 已配置：codec=…`（配上了吗）→
+`已解出第一帧并画进 canvas（WxH）`（解出来了吗）→ 画面（`pointer-events:none` 有没有让触摸回到 Flutter）。
+
+**另外**：本会话里用户把 macOS 的**屏幕录制 + 辅助功能**权限放开了，
+所以 `screencapture` 与 `osascript`（System Events）现在可用 —— **"上屏必须自己截图确认"
+这条纪律终于能自己执行了**（`screencapture -x shot.png` + `read_image`），
+不用每次把用户当测试机。之前 §9.2 末尾那段"权限拿不到、只能靠用户"的描述在 macOS 上已过时。
+
+### 17.8 还没做的（下次接着做）
 
 - **不跟随设备分辨率变化重建解码器**：web 这边 `configure` 一旦定下 codec 就不重配；
   设备旋转导致 SPS 变化（例如 1200x672 → 672x1200）时，Chrome 多数情况下能靠帧内
