@@ -1,0 +1,340 @@
+# GitHub Actions：五端构建（Android / Windows / web / iOS / macOS）+ 打 tag 自动发 Release
+#
+# ── 为什么这份能覆盖五端 ────────────────────────────────────────────────
+# GitHub 自带 `windows-latest` 与 `macos-latest`（不像自托管方案要自己注册机器），
+# 所以"Flutter 的 Windows 产物只能在 Windows 上构建"这条硬约束不再需要额外基础设施：
+#   * `verify`  / `android` / `web`  → `ubuntu-latest`
+#   * `windows`                     → `windows-latest`
+#   * `apple`（iOS + macOS 一起）    → `macos-latest`
+#
+# ── 产物 ──────────────────────────────────────────────────────────────
+#   * android-apk  : ws_scrcpy_client-<版本>[-<abi>].apk（默认 universal；手动触发可拆分）
+#   * windows-x64  : ws_scrcpy_client-<版本>-windows-x64.zip（解压即用）
+#   * web-dist     : ws_scrcpy_client-<版本>-web.zip（静态站点，可挂到服务端同源下）
+#   * apple-builds : ws_scrcpy_client-<版本>-ios.ipa（未签名）+ macos.zip
+#
+# ── 版本号 ────────────────────────────────────────────────────────────
+# 推 tag（形如 v1.2.3）时用 tag 名做 `--build-name`、run number 做 build 号；
+# 普通分支推送沿用 `pubspec.yaml` 里的版本。
+name: build
+
+on:
+  push:
+    # 默认分支可能是 master 也可能是 main，两个都收，避免"推了却不触发"。
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      split_abi:
+        description: 'Android 按 ABI 拆分 APK（armeabi-v7a / arm64-v8a / x86_64）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 AGENTS.md §2 对齐；升级 Flutter 时这里和 pubspec 的 sdk 约束一起改。
+  FLUTTER_VERSION: '3.47.1'
+
+jobs:
+  # ── 1. 静态检查 + 单测（与平台无关，跑在 Linux 上最快也最便宜）──────────────
+  verify:
+    name: 静态检查与单测
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 工具链版本
+        run: flutter --version
+
+      - name: 依赖
+        run: flutter pub get
+
+      - name: 静态检查
+        run: dart analyze lib test tools
+
+      - name: 单测
+        run: flutter test
+
+  # ── 2. Android APK ────────────────────────────────────────────────────
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 90
+    env:
+      REF_NAME: ${{ github.ref_name }}
+      RUN_NUMBER: ${{ github.run_number }}
+      SPLIT_ABI: ${{ inputs.split_abi }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 17（Gradle 要求）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # GitHub 的 ubuntu-latest 自带 Android SDK，缺的平台/build-tools 由 Gradle 自动补装
+      # （runner 上许可已接受），所以这里不需要额外装 SDK。
+      - name: 构建 APK（Release）
+        run: |
+          set -e
+          EXTRA=""
+          if [[ "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            NAME="${REF_NAME#v}"
+            EXTRA="--build-name=$NAME --build-number=$RUN_NUMBER"
+            echo "按 tag 注入版本：$NAME+$RUN_NUMBER"
+          fi
+          flutter pub get
+          if [ "$SPLIT_ABI" = "true" ]; then
+            echo "按 ABI 拆分打包"
+            flutter build apk --release --split-per-abi $EXTRA
+          else
+            echo "打 universal APK（一份装所有架构，含 redroid 用的 x86_64）"
+            flutter build apk --release $EXTRA
+          fi
+
+      - name: 整理产物（带上版本号）
+        run: |
+          set -e
+          NAME="dev"
+          if [[ "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then NAME="${REF_NAME#v}"; fi
+          mkdir -p dist
+          for apk in build/app/outputs/flutter-apk/*.apk; do
+            base=$(basename "$apk" .apk)
+            abi="${base#app-}"; abi="${abi%-release}"
+            suffix=""; [ "$abi" != "release" ] && suffix="-$abi"
+            cp "$apk" "dist/ws_scrcpy_client-$NAME$suffix.apk"
+          done
+          ls -lh dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── 3. web 静态站点（Linux 上就能构建）──────────────────────────────────
+  web:
+    name: web 站点
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 45
+    env:
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 依赖
+        run: flutter pub get
+
+      # 脚本自带：① 从 pub 缓存准备 sqlite3.wasm + drift_worker.js（不进仓库）
+      # ② `--no-web-resources-cdn`（否则离线环境永远白屏，见 AGENTS §9.3）
+      - name: 构建 web
+        run: tools/build_web.sh
+
+      - name: 打包 zip
+        run: |
+          set -e
+          NAME="dev"
+          if [[ "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then NAME="${REF_NAME#v}"; fi
+          mkdir -p dist
+          (cd build/web && zip -qr "../../dist/ws_scrcpy_client-$NAME-web.zip" .)
+          ls -lh dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── 4. Windows 桌面端 ─────────────────────────────────────────────────
+  windows:
+    name: Windows 桌面（x64）
+    runs-on: windows-latest
+    needs: verify
+    timeout-minutes: 90
+    defaults:
+      run:
+        # 用 Windows 自带的 powershell(5.1)：它每台机器都有，而 pwsh 7 未必。
+        # 5.1 读无 BOM 的 UTF-8 脚本会把中文变乱码 —— 所以下面 run: 的提示文字一律英文。
+        shell: powershell
+    env:
+      REF_NAME: ${{ github.ref_name }}
+      RUN_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 工具链版本
+        run: |
+          flutter --version
+          dart --version
+
+      - name: 原生依赖（WebView2 / WIL）
+        # 干净 checkout 没有本机 NuGet 缓存 → -Online 从 nuget.org 取；
+        # 包落到 .tmp\nuget-source\ 后，构建期 tools\nuget_shim.cmd 会自己解包，
+        # 所以连 nuget.exe 都不需要（细节见 docs/ci.md 与 AGENTS.md §3.1）。
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\prepare_windows_deps.ps1 -Online
+
+      - name: 构建（Release）
+        run: |
+          $extra = @()
+          if ($env:REF_NAME -match '^v?\d+\.\d+\.\d+') {
+            $name = $env:REF_NAME -replace '^v', ''
+            $extra += "--build-name=$name"
+            $extra += "--build-number=$env:RUN_NUMBER"
+            Write-Host "version from tag: $name+$env:RUN_NUMBER"
+          } else {
+            Write-Host "not a tag push: use version from pubspec.yaml"
+          }
+          flutter pub get
+          flutter build windows --release @extra
+
+      - name: 打包 zip
+        run: |
+          $src = 'build\windows\x64\runner\Release'
+          if (-not (Test-Path $src)) { throw "build output missing: $src" }
+          $ver = if ($env:REF_NAME -match '^v?\d+\.\d+\.\d+') { $env:REF_NAME -replace '^v', '' } else { 'dev' }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $zip = "dist\ws_scrcpy_client-$ver-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$src\*" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "packed: $zip ($mb MB)"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── 5. Apple 两端（一个 runner 里先后构建，省一半 macOS 分钟数）──────────
+  apple:
+    name: iOS + macOS
+    runs-on: macos-latest
+    needs: verify
+    timeout-minutes: 90
+    env:
+      REF_NAME: ${{ github.ref_name }}
+      RUN_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 依赖（macos-latest 自带 CocoaPods，flutter_secure_storage 需要它）
+        run: flutter pub get
+
+      - name: 版本参数
+        id: ver
+        run: |
+          set -e
+          NAME="dev"
+          if [[ "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then NAME="${REF_NAME#v}"; fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: 构建 iOS（不签名）
+        run: flutter build ios --release --no-codesign --build-name=${{ steps.ver.outputs.name }} --build-number=${{ env.RUN_NUMBER }}
+
+      - name: 构建 macOS
+        run: flutter build macos --release --build-name=${{ steps.ver.outputs.name }} --build-number=${{ env.RUN_NUMBER }}
+
+      - name: 打包（ipa 用 Payload/ 目录结构，macOS 用 ditto 保住符号链接与权限）
+        run: |
+          set -e
+          NAME="${{ steps.ver.outputs.name }}"
+          mkdir -p dist
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -R Runner.app Payload/
+          zip -qry "$GITHUB_WORKSPACE/dist/ws_scrcpy_client-$NAME-ios.ipa" Payload
+          cd "$GITHUB_WORKSPACE/build/macos/Build/Products/Release"
+          APP=$(find . -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP" ]; then echo "::error::no .app produced"; exit 1; fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$GITHUB_WORKSPACE/dist/ws_scrcpy_client-$NAME-macos.zip"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-builds
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── 6. 发 Release（只在推 `v*` tag 时；GitHub 自带 GITHUB_TOKEN，不用另配）──
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [android, web, windows, apple]
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: 取回所有产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列一下要发什么
+        run: ls -lh dist
+
+      - name: 建 Release 并附上产物
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

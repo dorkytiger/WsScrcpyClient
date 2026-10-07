@@ -1227,11 +1227,14 @@ VideoToolbox 不需要额外 entitlement，但 **Debug 与 Release 两个 entitl
 
 ## 14. CI 与应用图标
 
-- **CI（Forgejo Actions）**：`.forgejo/workflows/build.yml` 三个 job ——
-  `verify`（analyze + test）/ `windows`（zip）/ `android`（APK）。
-  **硬约束：Windows 桌面产物只能在 Windows 上构建**，所以用一台 Windows 自托管 runner
-  同时跑两端（`runs-on: windows` ↔ runner 标签 `windows:host`）。注册、工具链、排错见 **`docs/ci.md`**。
+- **CI（GitHub Actions）**：`.github/workflows/build.yml` 六个 job ——
+  `verify`（analyze + test，门禁）/ `android`（APK）/ `web`（静态站点）/ `windows`（zip）/
+  `apple`（iOS 未签名 ipa + macOS zip，**合在一个 macOS job 里省 10 倍计费**）/
+  `release`（只在推 `v*` tag 时发 Release，用自带的 `GITHUB_TOKEN`）。
+  四个构建 job 都 `needs: verify`。**硬约束：Windows 与 macOS/iOS 的产物只能在对应系统上构建**，
+  好在 `windows-latest` / `macos-latest` 是 GitHub 自带的（不再是自托管 runner）。
   Windows 依赖那一步在 CI 上用 `tools\prepare_windows_deps.ps1 -Online`（干净机器没有本机 NuGet 缓存）。
+  完整 job 表、Secrets、故障对照见 **`docs/ci.md`**。
 - **图标**：`python tools/make_icons.py` 一次生成 Windows(.ico)/Android(含自适应)/macOS/iOS/Web，
   母版 `assets/icon/app_icon_1024.png`；换配色只改脚本顶部的 `GRAD_*` 常量。
   **改完必须看图确认**（第一版把"缝隙"写成了实心矩形，整个图形被擦掉，是看图才发现的）。

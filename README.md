@@ -1,6 +1,6 @@
 # ws-scrcpy 客户端
 
-[![CI](https://forgejo.dorkytiger.top/u758272094/WsScrcpyClient/badges/workflows/build.yml/badge.svg?branch=master)](https://forgejo.dorkytiger.top/u758272094/WsScrcpyClient/actions)
+[![build](https://github.com/dorkytiger/WsScrcpyClient/actions/workflows/build.yml/badge.svg)](https://github.com/dorkytiger/WsScrcpyClient/actions/workflows/build.yml)
 [![Flutter](https://img.shields.io/badge/Flutter-3.47-02569B?logo=flutter)](https://flutter.dev)
 [![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS%20%7C%20Web-success)](#平台支持)
 
@@ -163,6 +163,7 @@ windows/runner/  Windows 的 Media Foundation 解码 + D3D11 呈现
 android/…/       Android 的 MediaCodec 解码
 tools/           协议探测、离线探针（解码器自测）、打包脚本
 docs/            协议实测、Apple 签名与上架、解码历史、CI
+.github/         GitHub Actions：verify / android / web / windows / apple / release
 ```
 
 ---
@@ -175,7 +176,7 @@ docs/            协议实测、Apple 签名与上架、解码历史、CI
 | [docs/ws-scrcpy-protocol.md](docs/ws-scrcpy-protocol.md) | **动协议相关代码前必读**：逐字节实测记录、复用层、控制消息、视频帧结构 |
 | [docs/apple-distribution.md](docs/apple-distribution.md) | 要给 iOS / macOS 签名、公证、上架时：已落地的工程配置、审核风险与对策 |
 | [docs/windows-decoder-history.md](docs/windows-decoder-history.md) | Windows 解码从崩溃/黑屏到可用的完整证据链（排查同类问题的模板） |
-| [docs/ci.md](docs/ci.md) | CI（Forgejo Actions）与本机打包 |
+| [docs/ci.md](docs/ci.md) | CI（GitHub Actions，五端构建 + tag 自动发 Release）与本机打包 |
 
 ---
 
