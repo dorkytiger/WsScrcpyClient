@@ -114,9 +114,10 @@ final class ScrcpyVideoSurfaceRegistry {
     lock.unlock()
     if first {
       // 一行把"layer 到底有没有条件显示"讲清楚：尺寸为 0 / 没进 window 都会是黑的
+      // 注意：`window` 是 NSView/UIView 的属性，CALayer 上没有（写 `.window` 会编译失败）
       scrcpyVideoLog(
         "原生层首帧：layer bounds=\(layer.bounds.size) status=\(layer.status.rawValue) "
-          + "ready=\(layer.isReadyForMoreMediaData) window=\(layer.window != nil)")
+          + "ready=\(layer.isReadyForMoreMediaData)")
     }
     return true
   }
