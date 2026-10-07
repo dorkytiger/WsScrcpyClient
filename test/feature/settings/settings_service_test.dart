@@ -122,7 +122,6 @@ void main() {
       expect(loaded.profileId, isNull);
       expect(loaded.profileName, isNull);
       expect(loaded.serverUrl, SettingsService.defaults.serverUrl);
-      expect(loaded.passwordPersisted, isTrue);
       expect(loaded.hasBasicAuth, isFalse);
     });
   });

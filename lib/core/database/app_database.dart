@@ -5,7 +5,12 @@ part 'app_database.g.dart';
 
 /// 连接配置（profile）表：一套"服务端 + 凭据 + 偏好"的组合。
 ///
-/// 密码**不入库**（见 `SecretLocalDatasource`），因此这里没有 password 列。
+/// **密码明文入库**（2026-10-07 用户的决定："flutter_secure_storage 不要了，明文存就行"）。
+/// 此前密码走 `flutter_secure_storage`，但它有两个持续的成本：
+/// ① macOS 上需要 data protection keychain 授权（`-34018`，见 AGENTS §16.1）；
+/// ② 它不支持 Swift Package Manager → 会把 iOS/macOS 整个工程拖回去用 CocoaPods（§3.3）。
+/// **代价**：能读到应用数据目录的人就能看到密码 —— 私有服务端自用可接受。
+/// 将来若要重新加密，只要换掉这一列的读写（[ProfileLocalDatasource] 是唯一入口）。
 class ConnectionProfiles extends Table {
   IntColumn get id => integer().autoIncrement()();
 
@@ -17,6 +22,9 @@ class ConnectionProfiles extends Table {
 
   /// Basic Auth 用户名；服务端未开鉴权时为空串。
   TextColumn get username => text().withDefault(const Constant(''))();
+
+  /// Basic Auth 密码（**明文**，见类文档）。
+  TextColumn get password => text().withDefault(const Constant(''))();
 
   /// 投流/操作期间是否保持屏幕常亮。
   BoolColumn get keepScreenOn => boolean().withDefault(const Constant(true))();
@@ -69,12 +77,20 @@ class AppDatabase extends _$AppDatabase {
   static const String dataDirDefine = String.fromEnvironment('WS_DATA_DIR');
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (Migrator m) async {
       await m.createAll();
+    },
+    // v1 → v2：密码从"系统安全存储"搬进 `connection_profiles.password`。
+    // 老库里的密码搬不过来（安全存储里的密文没动），用户重填一次即可 ——
+    // 但**必须补列**，否则老库会因 schema 与代码不一致而打不开。
+    onUpgrade: (Migrator m, int from, int to) async {
+      if (from < 2) {
+        await m.addColumn(connectionProfiles, connectionProfiles.password);
+      }
     },
   );
 

@@ -86,31 +86,11 @@ void main() {
     expect(profiles.data, hasLength(1));
     expect(profiles.data!.single.isActive, isTrue);
     expect(profiles.data!.single.username, 'u758272094');
-    // 密码不进库，只进安全存储。
-    expect(context.secrets.stored.values, contains('secret'));
-  });
-
-  testWidgets('安全存储写不进时仍保存成功，但提示"仅本次会话有效"', (WidgetTester tester) async {
-    final context = SettingsTestContext(
-      secrets: FakeSecretLocalDatasource(failWrites: true),
-    );
-    addTearDown(context.dispose);
-    final viewModel = SettingsViewModel(context.service);
-    addTearDown(viewModel.dispose);
-
-    await pumpSetupPage(tester, viewModel);
-    await tester.enterText(
-      find.byType(TextField).first,
-      'https://android.dorkytiger.top/',
-    );
-    await tester.enterText(find.byType(TextField).at(1), 'u');
-    await tester.enterText(find.byType(TextField).at(2), 'p');
-    await tester.tap(find.text('保存并继续'));
-    await tester.pump();
-
-    expect(find.textContaining('无法写入系统安全存储'), findsOneWidget);
-    final profiles = await context.service.listProfiles();
-    expect(profiles.data, hasLength(1));
+    // 密码明文落在 connection_profiles.password（2026-10-07 去掉了 flutter_secure_storage）。
+    final rows = await context.database
+        .select(context.database.connectionProfiles)
+        .get();
+    expect(rows.single.password, 'secret');
   });
 
   test('视图模型：hasProfile 从 false 变为 true 驱动首次进入的判定', () async {

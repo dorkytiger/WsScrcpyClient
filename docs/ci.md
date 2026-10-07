@@ -310,6 +310,9 @@ printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
 #### ★ 第七个坑（2026-10-07 实测）：**插件自己的 buildscript** 仍然去 `dl.google.com`
 
 ```
+> 下面的例子来自当时还在依赖里的 `flutter_secure_storage`（2026-10-07 已移除，
+> 但它踩出来的这条规律对所有插件都成立：**插件的 buildscript 仓库写在 pub-cache 里**）。
+
 A problem occurred configuring project ':flutter_secure_storage'.
 > Could not resolve all artifacts for configuration 'classpath'.
    > Could not resolve com.android.tools.build:gradle:8.5.1.
@@ -382,7 +385,7 @@ Android 构建里每个子项目（app + 每个插件）用**自己的** `compil
 |---|---|---|
 | app（Flutter 3.47 默认） | 36 | `platform-36_r02.zip` |
 | `path_provider_android` **2.3.x**（会带进 `jni`） | 35 | `platform-35_r02.zip` |
-| `flutter_secure_storage` | 34 | **`platform-34-ext7_r03.zip`**（34 是 ext7 变体，没有 `platform-34_r03.zip`） |
+| `flutter_secure_storage`（**已移除**，装 34 现在不是必需） | 34 | **`platform-34-ext7_r03.zip`**（34 是 ext7 变体，没有 `platform-34_r03.zip`） |
 
 > **别被 `sqlite3_flutter_libs` 骗了**（我一开始就归错因）：drift 自己**不带** SQLite 引擎，
 > 但 `drift_flutter` 现在依赖的是 **`sqlite3_flutter_libs 0.6.0+eol`** —— 那是个**空壳**

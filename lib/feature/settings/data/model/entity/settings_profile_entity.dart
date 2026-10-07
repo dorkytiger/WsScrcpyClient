@@ -11,6 +11,7 @@ class SettingsProfileEntity {
     required this.name,
     required this.serverUrl,
     required this.username,
+    required this.password,
     required this.keepScreenOn,
     required this.lastUdid,
     required this.isActive,
@@ -21,6 +22,7 @@ class SettingsProfileEntity {
     required this.name,
     required this.serverUrl,
     required this.username,
+    required this.password,
     required this.keepScreenOn,
     this.lastUdid,
   }) : id = unstoredId,
@@ -36,6 +38,10 @@ class SettingsProfileEntity {
 
   final String serverUrl;
   final String username;
+
+  /// Basic Auth 密码（**明文**，随配置一起落库；见 `ConnectionProfiles` 的类文档）。
+  final String password;
+
   final bool keepScreenOn;
   final String? lastUdid;
 
@@ -49,6 +55,7 @@ class SettingsProfileEntity {
     String? name,
     String? serverUrl,
     String? username,
+    String? password,
     bool? keepScreenOn,
     String? lastUdid,
     bool? isActive,
@@ -58,6 +65,7 @@ class SettingsProfileEntity {
       name: name ?? this.name,
       serverUrl: serverUrl ?? this.serverUrl,
       username: username ?? this.username,
+      password: password ?? this.password,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
       lastUdid: lastUdid ?? this.lastUdid,
       isActive: isActive ?? this.isActive,
@@ -67,6 +75,6 @@ class SettingsProfileEntity {
   @override
   String toString() =>
       'SettingsProfileEntity(id: $id, name: $name, serverUrl: $serverUrl, '
-      'username: $username, keepScreenOn: $keepScreenOn, lastUdid: $lastUdid, '
-      'isActive: $isActive)';
+      'username: $username, password: ${password.isEmpty ? '' : '***'}, '
+      'keepScreenOn: $keepScreenOn, lastUdid: $lastUdid, isActive: $isActive)';
 }

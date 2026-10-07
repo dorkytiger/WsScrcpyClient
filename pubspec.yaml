@@ -36,7 +36,6 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # 凭据与设置的安全存储（禁止明文落盘）
-  flutter_secure_storage: ^9.2.4
 
   # 投流/操作期间保持屏幕常亮
   wakelock_plus: ^1.2.10

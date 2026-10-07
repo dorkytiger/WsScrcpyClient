@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ws_scrcpy_client/feature/settings/data/local/secret_local_datasource.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/vo/settings_profile_vo.dart';
 
 import 'settings_test_support.dart';
@@ -208,13 +207,15 @@ void main() {
       expect(loaded.password, isEmpty);
     });
 
-    test('删除配置时同时删除它的密码', () async {
+    test('删除配置时同时删除它的密码（同一条记录）', () async {
       final id = await context.createProfile(password: 'secret');
-      expect(context.secrets.stored[id], 'secret');
 
       await context.service.deleteProfile(id);
 
-      expect(context.secrets.stored.containsKey(id), isFalse);
+      final rows = await context.database
+          .select(context.database.connectionProfiles)
+          .get();
+      expect(rows.where((row) => row.id == id), isEmpty);
     });
 
     test('删除不存在的配置返回失败而不是静默成功', () async {
@@ -286,18 +287,21 @@ void main() {
     });
   });
 
-  group('密码：安全存储 + 降级', () {
-    test('密码写入安全存储，且不进数据库', () async {
+  group('密码：明文随配置一起落库', () {
+    test('新建配置时密码写进 connection_profiles.password', () async {
       final id = await context.createProfile(password: 'p@ss');
 
-      expect(context.secrets.stored[id], 'p@ss');
-      expect(SecretLocalDatasource.keyFor(id), 'settings.password.$id');
-      // 数据库表里根本没有密码列（密码只存安全存储）。
-      // 注：drift 默认把 Dart 字段名转成 snake_case 作为 SQL 列名。
+      final rows = await context.database
+          .select(context.database.connectionProfiles)
+          .get();
+      expect(rows.single.id, id);
+      expect(rows.single.password, 'p@ss');
+
+      // drift 默认把 Dart 字段名转成 snake_case 作为 SQL 列名
       final columnNames = context.database.connectionProfiles.$columns
           .map((column) => column.name)
           .toList();
-      expect(columnNames, isNot(contains('password')));
+      expect(columnNames, contains('password'));
       expect(
         columnNames,
         containsAll(<String>[
@@ -310,94 +314,47 @@ void main() {
       );
     });
 
-    test('读取失败 → 当作没有密码，且不抛异常', () async {
+    test('load 能把密码读回来（重启后依然可用）', () async {
       await context.createProfile(password: 'p@ss');
-      context.secrets.failReads = true;
 
       final loaded = (await context.service.load()).data!;
 
-      expect(loaded.password, isEmpty);
-      expect(loaded.hasBasicAuth, isFalse);
-      expect(loaded.passwordPersisted, isTrue);
-    });
-
-    test('写入失败 → 保存仍成功，密码仅本次会话有效（passwordPersisted=false）', () async {
-      context.secrets.failWrites = true;
-
-      final saved = await context.service.save(
-        settingsDto(serverUrl: 'https://a.example/', password: 'p@ss'),
-      );
-
-      expect(saved.isSuccess, isTrue);
-      final loaded = (await context.service.load()).data!;
       expect(loaded.password, 'p@ss');
-      expect(loaded.passwordPersisted, isFalse);
-      expect(context.secrets.stored, isEmpty);
+      expect(loaded.hasBasicAuth, isTrue);
     });
 
-    test('saveAndLoad 一次拿到含 passwordPersisted 的最新状态', () async {
-      context.secrets.failWrites = true;
-      final degraded = (await context.service.saveAndLoad(
-        settingsDto(password: 'p@ss'),
-      )).data!;
-      expect(degraded.passwordPersisted, isFalse);
+    test('saveAndLoad 更新密码', () async {
+      await context.createProfile(password: 'old');
 
-      context.secrets.failWrites = false;
-      final ok = (await context.service.saveAndLoad(
-        settingsDto(password: 'p@ss'),
-      )).data!;
-      expect(ok.passwordPersisted, isTrue);
-      expect(context.secrets.stored[ok.profileId], 'p@ss');
+      final updated =
+          (await context.service.saveAndLoad(settingsDto(password: 'new'))).data!;
+
+      expect(updated.password, 'new');
+      expect((await context.service.load()).data!.password, 'new');
     });
 
-    test('清空密码会从安全存储删除', () async {
+    test('清空密码会把它从记录里抹掉', () async {
       final id = await context.createProfile(password: 'p@ss');
 
       await context.service.save(settingsDto(username: '', password: ''));
 
-      expect(context.secrets.stored.containsKey(id), isFalse);
+      final rows = await context.database
+          .select(context.database.connectionProfiles)
+          .get();
+      expect(rows.single.id, id);
+      expect(rows.single.password, isEmpty);
       expect((await context.service.load()).data!.password, isEmpty);
     });
 
-    test('删除密码失败不影响删除配置', () async {
+    test('删除配置会连密码一起删（同一条记录）', () async {
       final id = await context.createProfile(password: 'p@ss');
-      context.secrets.failDeletes = true;
 
-      final result = await context.service.deleteProfile(id);
+      expect((await context.service.deleteProfile(id)).isSuccess, isTrue);
 
-      expect(result.isSuccess, isTrue);
-      expect((await context.service.listProfiles()).data, isEmpty);
-    });
-  });
-
-  group('SecretLocalDatasource 单元行为', () {
-    test('empty 密码等价于删除', () async {
-      final secrets = FakeSecretLocalDatasource();
-      expect(await secrets.write(1, 'abc'), SecretWriteOutcome.persisted);
-      expect(secrets.readPersisted(1), completion('abc'));
-
-      expect(await secrets.write(1, ''), SecretWriteOutcome.persisted);
-      expect(await secrets.readPersisted(1), isNull);
-      expect(secrets.readSessionOnly(1), isNull);
-    });
-
-    test('写失败时内存兜底可读，恢复后写成功会清掉兜底', () async {
-      final secrets = FakeSecretLocalDatasource(failWrites: true);
-
-      expect(await secrets.write(7, 'abc'), SecretWriteOutcome.sessionOnly);
-      expect(secrets.readSessionOnly(7), 'abc');
-
-      secrets.failWrites = false;
-      expect(await secrets.write(7, 'abc'), SecretWriteOutcome.persisted);
-      expect(secrets.readSessionOnly(7), isNull);
-      expect(await secrets.readPersisted(7), 'abc');
-    });
-
-    test('每个 profile 的键互不相同', () {
-      expect(<String>{
-        SecretLocalDatasource.keyFor(1),
-        SecretLocalDatasource.keyFor(2),
-      }, hasLength(2));
+      expect(
+        await context.database.select(context.database.connectionProfiles).get(),
+        isEmpty,
+      );
     });
   });
 }

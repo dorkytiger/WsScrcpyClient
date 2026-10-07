@@ -6,8 +6,8 @@ import 'package:ws_scrcpy_client/feature/settings/data/model/entity/settings_pro
 
 /// `connection_profiles` 表的数据边界。
 ///
-/// 只做这一张表的读写与它的表级不变量（**全局最多一个 active**），
-/// 不掺业务校验、不碰安全存储。
+/// 只做这一张表的读写与它的表级不变量（**全局最多一个 active**），不掺业务校验。
+/// 密码也在这张表里（**明文列**，见 [ConnectionProfiles] 的类文档）。
 class ProfileLocalDatasource {
   ProfileLocalDatasource(this._database);
 
@@ -84,6 +84,7 @@ class ProfileLocalDatasource {
                 name: Value(draft.name),
                 serverUrl: draft.serverUrl,
                 username: Value(draft.username),
+                password: Value(draft.password),
                 keepScreenOn: Value(draft.keepScreenOn),
                 lastUdid: Value(draft.lastUdid),
                 isActive: Value(makeActive),
@@ -110,6 +111,7 @@ class ProfileLocalDatasource {
                   name: Value(profile.name),
                   serverUrl: Value(profile.serverUrl),
                   username: Value(profile.username),
+                  password: Value(profile.password),
                   keepScreenOn: Value(profile.keepScreenOn),
                   lastUdid: Value(profile.lastUdid),
                   updatedAt: Value(DateTime.now()),
@@ -236,6 +238,7 @@ class ProfileLocalDatasource {
       name: row.name,
       serverUrl: row.serverUrl,
       username: row.username,
+      password: row.password,
       keepScreenOn: row.keepScreenOn,
       lastUdid: row.lastUdid,
       isActive: row.isActive,

@@ -10,7 +10,6 @@ class AppSettingsVo {
     required this.keepScreenOn,
     this.profileId,
     this.profileName,
-    this.passwordPersisted = true,
   });
 
   /// 服务端入口，形如 `https://android.dorkytiger.top/`（http/https 均可）。
@@ -19,7 +18,7 @@ class AppSettingsVo {
   /// Basic Auth 用户名（服务端未开启鉴权时可为空）。
   final String username;
 
-  /// Basic Auth 密码。
+  /// Basic Auth 密码（**明文**，与配置同存本地数据库；见 `ConnectionProfiles`）。
   final String password;
 
   /// 上次使用的设备序列号（"记住上次设备"）。
@@ -33,13 +32,6 @@ class AppSettingsVo {
 
   /// 当前生效配置的展示名；未配置时为 null。
   final String? profileName;
-
-  /// 密码是否已持久化到系统安全存储。
-  ///
-  /// 受限环境里安全存储可能写不进去，此时密码只在本次会话有效：
-  /// 该值为 false，UI 可以据此提示"此次密码不会保留到下次启动"。
-  /// 没有密码可存时视为 true（没有"未持久化"的东西）。
-  final bool passwordPersisted;
 
   /// 是否配置了 Basic Auth 凭据。
   bool get hasBasicAuth => username.isNotEmpty && password.isNotEmpty;
@@ -59,7 +51,6 @@ class AppSettingsVo {
     bool? keepScreenOn,
     int? profileId,
     String? profileName,
-    bool? passwordPersisted,
   }) {
     return AppSettingsVo(
       serverUrl: serverUrl ?? this.serverUrl,
@@ -69,7 +60,6 @@ class AppSettingsVo {
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
       profileId: profileId ?? this.profileId,
       profileName: profileName ?? this.profileName,
-      passwordPersisted: passwordPersisted ?? this.passwordPersisted,
     );
   }
 
@@ -78,5 +68,5 @@ class AppSettingsVo {
       'AppSettingsVo(serverUrl: $serverUrl, username: $username, '
       'password: ${password.isEmpty ? '' : '***'}, lastUdid: $lastUdid, '
       'keepScreenOn: $keepScreenOn, profileId: $profileId, '
-      'profileName: $profileName, passwordPersisted: $passwordPersisted)';
+      'profileName: $profileName)';
 }

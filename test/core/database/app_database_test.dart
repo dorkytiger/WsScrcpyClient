@@ -45,8 +45,8 @@ void main() {
       expect(rows, hasLength(1));
     });
 
-    test('schemaVersion 为 1 且能建表（onCreate 走通）', () async {
-      expect(database.schemaVersion, 1);
+    test('schemaVersion 为 2 且能建表（onCreate 走通）', () async {
+      expect(database.schemaVersion, 2);
       // 能查就说明 onCreate 的 createAll 成功执行了。
       expect(await database.select(database.connectionProfiles).get(), isEmpty);
     });

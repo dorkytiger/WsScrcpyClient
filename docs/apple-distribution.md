@@ -15,14 +15,13 @@
 | macOS entitlements | `DebugProfile.entitlements` 与 `Release.entitlements` 都含 `app-sandbox` + **`network.client`**。**缺 `network.client` 时沙箱会挡掉所有出站连接**（投流与 WebView 都连不出网），而报错很难懂 —— 这条已经加好，别删。Debug 另有 `cs.allow-jit`（Flutter 需要）与 `network.server` |
 | iOS `Info.plist` | `ITSAppUsesNonExemptEncryption=false`；`NSAppTransportSecurity.NSAllowsLocalNetworking=true`（局域网明文 `ws://<设备IP>:8886` 直连需要它，比 `NSAllowsArbitraryLoads` 安全得多）；`NSLocalNetworkUsageDescription`（中文文案已写）。⚠️ **这三条都还没在真机上实测**（模拟器走公网 `wss://` 用不到） |
 | Swift 文件登记 | 三个文件已在 `ios/Runner.xcodeproj/project.pbxproj` 里（`plutil -lint` 通过、`xcodebuild -list` 能解析、`flutter build ios` 能编译）。共用代码在 `darwin/`，两个 Xcode 工程都用 `path = ../darwin` 引用 —— 改一处两端同时生效 |
-| CocoaPods | **硬前置**：`flutter_secure_storage` 还不支持 Swift Package Manager，Flutter 会对它回退到 CocoaPods，没装时 `flutter build ios` 直接以 `CocoaPods not installed or not in valid state` 结束 |
+| CocoaPods | ~~硬前置~~ **已不需要**（2026-10-07）：以前是 `flutter_secure_storage` 不支持 SPM 才要它，该插件已移除，现在全部插件走 SPM，`ios/Podfile` 与 `macos/Podfile` 也已删除 |
 | 应用标识 | 仍是 `flutter create` 默认的 `com.example`（`android/`、`ios/`、`windows/runner/` 三处），**分发/上架前必须改** |
 
 ## 1. macOS：分发
 
-- **只在开发机上 `flutter run` 自测**：无需签名配置（ad-hoc 即可）——但要留意
-  [§16.1](../AGENTS.md) 那个坑：ad-hoc 签名下 **data protection keychain 用不了**
-  （`-34018 errSecMissingEntitlement`），所以密码持久化走了传统钥匙串。
+- **只在开发机上 `flutter run` 自测**：无需签名配置（ad-hoc 即可）。
+  （以前还要留意 [§16.1](../AGENTS.md) 那个钥匙串坑；密码改明文入库后已无关。）
 - **分发给别人（不走 Mac App Store）**：macOS 10.15 起要求
   **Developer ID 签名 + Hardened Runtime + 公证**，否则 Gatekeeper 直接拦。
   流程：`codesign`（Developer ID Application 证书，**签完再打 dmg/pkg**）→
