@@ -81,28 +81,26 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 定位宿主机资源目录（挂载点在哪个路径上）
-        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
-        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
-        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
-        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
-        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
+      - name: 定位宿主机资源目录（纯诊断，永远不让 job 变红）
+        # job 容器由哪个 daemon 创建，决定 --volume 的**源路径**怎么写：
+        #   ① runner 走 dind（实测 DOCKER_HOST=tcp://docker-in-docker:2375）→ 源路径是 dind 内的 /host-dev
+        #   ② runner 直连宿主 daemon → 源路径是宿主的 /home/warren/dev
+        # 猜错的那侧 docker 会凭空把源路径建成空目录再挂进来，所以这里把候选都扫一遍。
+        continue-on-error: true
         run: |
           FOUND=""
           for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
             if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
           done
-          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          ls -la /opt 2>&1 | head -10 || true
           if [ -n "$FOUND" ]; then
             echo "✓ 命中宿主机目录：$FOUND"
             echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
           else
-            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
-            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
-            echo "== mountinfo 相关行 =="
-            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+            echo "✗ 挂载点里没有 flutter —— 回退到下载（不影响正确性，只是慢）"
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10 || true
           fi
-
+          exit 0
       - name: 基础工具（镜像里未必带 xz/zip/unzip）
         run: |
           set -e
@@ -189,28 +187,26 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 定位宿主机资源目录（挂载点在哪个路径上）
-        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
-        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
-        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
-        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
-        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
+      - name: 定位宿主机资源目录（纯诊断，永远不让 job 变红）
+        # job 容器由哪个 daemon 创建，决定 --volume 的**源路径**怎么写：
+        #   ① runner 走 dind（实测 DOCKER_HOST=tcp://docker-in-docker:2375）→ 源路径是 dind 内的 /host-dev
+        #   ② runner 直连宿主 daemon → 源路径是宿主的 /home/warren/dev
+        # 猜错的那侧 docker 会凭空把源路径建成空目录再挂进来，所以这里把候选都扫一遍。
+        continue-on-error: true
         run: |
           FOUND=""
           for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
             if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
           done
-          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          ls -la /opt 2>&1 | head -10 || true
           if [ -n "$FOUND" ]; then
             echo "✓ 命中宿主机目录：$FOUND"
             echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
           else
-            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
-            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
-            echo "== mountinfo 相关行 =="
-            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+            echo "✗ 挂载点里没有 flutter —— 回退到下载（不影响正确性，只是慢）"
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10 || true
           fi
-
+          exit 0
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
         #   xz  → 解压 Flutter 的 tar.xz；
@@ -424,28 +420,26 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 定位宿主机资源目录（挂载点在哪个路径上）
-        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
-        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
-        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
-        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
-        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
+      - name: 定位宿主机资源目录（纯诊断，永远不让 job 变红）
+        # job 容器由哪个 daemon 创建，决定 --volume 的**源路径**怎么写：
+        #   ① runner 走 dind（实测 DOCKER_HOST=tcp://docker-in-docker:2375）→ 源路径是 dind 内的 /host-dev
+        #   ② runner 直连宿主 daemon → 源路径是宿主的 /home/warren/dev
+        # 猜错的那侧 docker 会凭空把源路径建成空目录再挂进来，所以这里把候选都扫一遍。
+        continue-on-error: true
         run: |
           FOUND=""
           for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
             if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
           done
-          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          ls -la /opt 2>&1 | head -10 || true
           if [ -n "$FOUND" ]; then
             echo "✓ 命中宿主机目录：$FOUND"
             echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
           else
-            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
-            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
-            echo "== mountinfo 相关行 =="
-            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+            echo "✗ 挂载点里没有 flutter —— 回退到下载（不影响正确性，只是慢）"
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10 || true
           fi
-
+          exit 0
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
         #   xz  → 解压 Flutter 的 tar.xz；
