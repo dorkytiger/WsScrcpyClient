@@ -62,23 +62,21 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 ## 2. 注册 runner
 
-### 2.1 Linux runner（`lingke`）：标签 = "**标签名 : 用哪个镜像跑**"
+### 2.1 Linux runner：标签 = "**标签名 : 用哪个镜像跑**"
 
-这台 runner 已在线，标签有 `docker` 与 `ubuntu-latest`（状态空闲），工作流里
-`runs-on: ubuntu-latest` 找的**就是它** —— 标签匹配没问题。
-真正决定"用什么环境跑"的是 `config.yml` 里标签**冒号右边**那半截：
+这台 runner 跑在 Docker 里（docker-compose：`forgejo-runner` + `docker-in-docker`），
+标签是**写在 compose 的 `command` 里的 `--label`**：
 
 ```yaml
-runner:
-  labels:
-    # 标签名 : 执行方式（docker://镜像 或 host）
-    - "ubuntu-latest:docker://data.forgejo.org/oci/ubuntu:24.04"   # ← 右边是镜像
+command: >
+  forgejo-runner daemon --config runner-config.yml
+  --label docker:docker://data.forgejo.org/oci/node:20-bookworm        # ← 可拉（实测 200）
+  --label ubuntu-latest:docker://data.forgejo.org/oci/ubuntu:24.04    # ← ★ 坏的
 ```
 
-#### ★ 已经踩到的坑（2026-10-07）：默认标签指向的镜像拉不到
+#### ★ 已经踩到的坑（2026-10-07）：`oci/ubuntu` 这个仓库**不存在**
 
-Forgejo runner **13.2.0** 的默认标签指向 `data.forgejo.org/oci/ubuntu:24.04`，而那个引用
-**解析不了**，于是 job 在 **Set up job** 阶段就死掉：
+症状：job 在 **Set up job** 阶段就结束，后面每步都是 0s：
 
 ```
 Start image=data.forgejo.org/oci/ubuntu:24.04
@@ -86,43 +84,47 @@ Error response from daemon: failed to resolve reference "data.forgejo.org/oci/ub
   data.forgejo.org/oci/ubuntu:24.04: not found
 ```
 
-**它看起来像工作流报错，其实是 runner 的配置问题**：工作流里只有 `runs-on: ubuntu-latest`，
-镜像地址完全来自 runner 的 `config.yml`。改法 —— 在 **runner 那台机器**上改 `config.yml`
-的标签，然后重启 runner：
+**看起来像工作流报错，其实是 runner 的标签映射问题**（工作流里只有 `runs-on: ubuntu-latest`）。
+直接问那个 registry 就能确认（实测，不是推测）：
+
+```console
+$ curl -s https://data.forgejo.org/v2/oci/ubuntu/tags/list
+{"errors":[{"code":"NAME_UNKNOWN","message":"repository name not known to registry",
+  "detail":{"name":"oci/ubuntu"}}]}                                    # ← 整个仓库都不存在
+
+$ curl -s https://data.forgejo.org/v2/oci/node/tags/list | head -c 120
+{"name":"oci/node","tags":["16-bullseye","16-buster","20","20-bookworm",…  # ← 有
+```
+
+也就是说 `oci/ubuntu:24.04` **不是 tag 写错，是那个路径从来没有过**，
+而 `oci/node`、`oci/python`、`oci/golang`、`oci/alpine`、`oci/debian` 都有。
+
+#### 修法（二选一）
+
+**① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
 
 ```yaml
-runner:
-  labels:
-    # ① 用 runner 官方文档自己给的那个镜像（★ 推荐）：里面有 node，
-    #    JS action（actions/checkout、upload-artifact 全是 JS）才跑得起来。
-    - "ubuntu-latest:docker://node:20-bookworm"
-    # ② 或换成这台机器拉得到的等价镜像 / 国内镜像源，例如：
-    # - "ubuntu-latest:docker://docker.m.daocloud.io/library/node:20-bookworm"
-    # ③ 或干脆不进容器、直接跑在宿主机上（宿主机要有 node + curl/git/tar）：
-    # - "ubuntu-latest:host"
+# docker-compose.yml 里 runner 的 command
+--label ubuntu-latest:docker://data.forgejo.org/oci/node:20-bookworm
 ```
-
-> **★ 别指向 `ubuntu:24.04` 这类"纯系统镜像"**：`actions/checkout`、`upload-artifact`
-> 这些 **JS action 需要容器里有 `node`**，纯 Ubuntu 镜像里没有，会以
-> `node: command not found` 失败（换一个坑继续踩）。
-> 官方默认那个 `data.forgejo.org/oci/ubuntu:24.04` 之所以能用，是因为它是 **Forgejo 自己
-> 为 act 构建的镜像**（自带 node）；它拉不到时，`node:20-bookworm` 是最省事的替代。
-
-**先在 runner 机器上手动验一次，别等 CI 报错**：
 
 ```bash
-docker pull docker.io/library/ubuntu:24.04     # 拉不动 = 网络到那个 registry 不通
-grep -A 6 labels <forgejo-runner 的 config.yml> # 看现在映射的是哪个镜像
+docker compose up -d forgejo-runner     # 让新标签生效
 ```
 
-> **镜像里没有 Flutter 不影响**：工作流的 `subosito/flutter-action` 会自己下 SDK，
-> Android 那步的 JDK 也由 `actions/setup-java` 装。
-> 但镜像里必须有 **`node`（JS action）+ `curl` / `git` / `tar` / `xz`（下 Flutter SDK）**，
-> web 那个 job 还要 **`zip`** —— 这就是"别用 alpine、也别用纯 ubuntu"的原因。
+**② 不改服务器，改工作流**：把 `verify` / `android` / `web` 三个 job 的
+`runs-on: ubuntu-latest` 换成 `runs-on: docker` —— 那个标签本来就指向可拉的
+`oci/node:20-bookworm`。代价是标签名不好读（"docker"其实指的是执行方式）。
 
-> 另一种思路：如果 `docker` 这个标签映射的镜像是好的，把三个 Linux job 临时改成
-> `runs-on: docker` 即可先跑起来；或者给 runner 加一个 `host` 标签后用 `runs-on: host`。
-> 两者都要先在 runner 端确认映射有效。
+#### 这两个镜像里有什么、没什么（别假设）
+
+| | 说明 |
+|---|---|
+| `node` ✓ | **JS action 必需**（`actions/checkout`、`upload-artifact` 都是 JS，要容器里有 node）—— 这也是**不能**把标签指向纯 `ubuntu`/`alpine` 镜像的原因 |
+| `flutter` ✗ | 由工作流的 `subosito/flutter-action` 自己下载（需要 `curl`/`tar`/`xz`，buildpack-deps 基础镜像都有） |
+| `java` ✗ | Android 那步由 `actions/setup-java` 装 JDK 17 |
+| `Android SDK` ✗ | 由 `android-actions/setup-android@v3` 装（**GitHub 的 ubuntu-latest 自带 SDK，容器里没有**，所以这一步不能省） |
+| `zip` / `unzip` ? | 不一定有 → 工作流里加了"基础工具"一步按需 `apt-get install` |
 
 ### 2.2 新加一台 Windows runner（可选，为了 CI 也能出 Windows 包）
 
@@ -232,7 +234,7 @@ tools\build_release.cmd -SkipTests              # 跳过 analyze/test，赶紧�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | **runner 的"标签→镜像"映射**指向了拉不到的镜像 —— 不是工作流问题（工作流只写了 `runs-on: ubuntu-latest`） | 改 runner 的 `config.yml` 标签（见 §2.1）后重启 runner；先在 runner 上 `docker pull` 验一次 |
+| job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | runner 的 `--label` 把 `ubuntu-latest` 映射到了**不存在的仓库** `oci/ubuntu`（那个 registry 只有 node/python/golang/alpine/debian） | 把那一行换成 `oci/node:20-bookworm` 后 `docker compose up -d`（见 §2.1）；或把工作流改成 `runs-on: docker` |
 | `windows` job 一直"等待中" | 没有标签为 `windows` 的 runner（现有 `lingke` 是 Linux/Docker） | 注册 Windows runner（§2.2），或先关掉它（别设 `WINDOWS_RUNNER` 变量），Windows 包用 `tools\build_release.cmd -Platform windows` |
 | 下载 action 失败 / `uses:` 解析不了 | runner 的 `DEFAULT_ACTIONS_URL` 指不到 GitHub 或代理不通 | 在 runner 的 `config.yml` 里设 `[actions] DEFAULT_ACTIONS_URL = https://github.com`（或把 action 从内网镜像取） |
 | `[nuget_shim] ERROR: WebView2 / WIL packages are missing` | 干净 checkout 没跑取包那步 | 工作流已含 `prepare_windows_deps.ps1 -Online`；若仍报错，看它上面一条下载是否被网络拦了 |
