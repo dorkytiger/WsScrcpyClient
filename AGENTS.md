@@ -1690,12 +1690,30 @@ getMaxSize = function () {
 我们的旧行为是"一律封顶到设备原生"（§12.7 的取舍），于是在大窗口 / Retina 上
 只能拿到 1280x720，再靠本地放大 2 倍以上——同一个流，放大倍数越大越糊。
 
-**新增开关 `VideoBoundsMode`**（`lib/feature/stream/enum/video_bounds_mode.dart`）：
+**画质档位 `VideoBoundsMode`**（`lib/feature/stream/enum/video_bounds_mode.dart`）——
+**2026-10-07 晚些时候从"一个开关"改成三档下拉**（用户反馈"**那个清晰优先并不能切换画质**"）：
 
-| 模式 | bounds 上限 | 默认 |
+| 档位 | bounds 上限（`upscaleCap`） | 备注 |
 |---|---|---|
-| `nativeCap`（省设备算力） | 设备原生 + "贴原生就吸原生"（§16.2.1） | 手动切回时用（转屏不改边界的退路） |
-| `viewport`（清晰优先） | 原生 ×2（`VideoBoundsMode.maxUpscale`） | **全部平台默认**（2026-10-07 用户要求） |
+| `smooth` 流畅运行 | 设备原生 ×1.0 | 带"贴原生就吸原生"（§16.2.1）；设备最省力 |
+| `balanced` 推荐 | 设备原生 ×1.5 | 中间档 |
+| `maximum` 最高画质 | 设备原生 ×2.0 | **App 层默认**（= 改版前"清晰优先"的行为，用户验证过满意） |
+
+**为什么一个开关不够（根因）**：两档的差别只在"上限是 1 倍还是 2 倍原生的**封顶**"，
+而请求量还受画面区大小限制（`clampBoundsForMode` 先按设备比例把视口收成框）。
+**画面区没超过原生 1.5 倍时，后两档会算出同一个边界**（例：视口 1898x853 → 收框 1516x853
+→ 两档都是 `1504x848`），用户切了自然"看不出变化"；电话/Retina 桌面上才会真的不同
+（手机横屏 2112x1188 → `1280x720` / `1920x1072` / `2112x1184`）。
+
+**配套改动（针对"看不出变化"这个体验问题）**："更多"面板里的开关换成
+**三档下拉**，并且那一行**直接显示实测数字**：`编码 1920x1072 · 本地放大 1.10x`
+（`PlayerViewModel.qualitySummary`，数据来自 `service.lastEffectiveBounds` 与
+画面诊断里算的物理放大倍率）。切档会**立刻**补发一条 `CHANGE_STREAM_PARAMETERS`
+（`setBoundsMode` 清去重缓存后重发），所以"切了没生效"这件事从此一眼可查。
+
+**服务层的默认仍是 `smooth`**（`StreamSessionService._boundsMode`）：直接构造 service 的
+测试与脚本期望"绝不向设备要放大"；App 层在 `connect()` 时用
+`PlayerViewModel.defaultBoundsMode`（= `maximum`）覆盖它。两处默认不同是**有意的**。
 
 **为什么默认改成清晰优先（用户实测的原话级证据）**：手机横屏时画面区物理 `2280x1206`，
 而 `nativeCap` 封顶在设备原生 `1280x720` → `画面诊断` 里 `**本地放大 1.68x**`（就是糊）；

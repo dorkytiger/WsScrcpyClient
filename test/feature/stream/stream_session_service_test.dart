@@ -406,35 +406,90 @@ void main() {
   // 编码边界策略（清晰度取舍）：网页端更清楚就是因为它的 bounds 不封顶到原生
   // ---------------------------------------------------------------------------
 
-  test('★ 清晰优先：允许编码超过设备原生（上限 2 倍），网页端就是这么干的', () {
+  test('★ 画质三档（原生 ×1 / ×1.5 / ×2）：同一画面区必须算出**三个不同的边界**', () {
     const native = VideoSize(1280, 720);
-    // 1898x853 就是 §12.7 那次真机实测的 Ui 视口（同比例收框后是 1516x853）。
+    // 手机横屏画面区的物理像素（874x402@3 扣掉安全区后 ≈ 2112x1188，正好 16:9）。
+    const phoneViewport = VideoSize(2112, 1188);
     expect(
       StreamSessionService.clampBoundsForMode(
-        viewport: const VideoSize(1898, 853),
+        viewport: phoneViewport,
         native: native,
-        mode: VideoBoundsMode.viewport,
+        mode: VideoBoundsMode.smooth,
       ),
-      const VideoSize(1504, 848),
-      reason: '清晰优先下不再封顶到原生，只受"原生 ×2"上限约束，再 16 对齐',
+      const VideoSize(1280, 720),
+      reason: '流畅运行 = 只编原生（本地要放大 1.65 倍，软但省设备算力）',
     );
     expect(
       StreamSessionService.clampBoundsForMode(
-        viewport: const VideoSize(6000, 3376),
+        viewport: phoneViewport,
         native: native,
-        mode: VideoBoundsMode.viewport,
+        mode: VideoBoundsMode.balanced,
+      ),
+      const VideoSize(1920, 1072),
+      reason: '推荐 = 原生 ×1.5（本地放大 ≈1.10，设备压力可控）',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: phoneViewport,
+        native: native,
+        mode: VideoBoundsMode.maximum,
+      ),
+      const VideoSize(2112, 1184),
+      reason: '最高画质 = 按画面区（本地放大 1.00，最清晰）',
+    );
+  });
+
+  test('★ 桌面 Retina（画面区 ≫ 原生）：三档同样逐级变清晰，2 倍是硬上限', () {
+    const native = VideoSize(1280, 720);
+    const retinaViewport = VideoSize(3000, 1687);
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: retinaViewport,
+        native: native,
+        mode: VideoBoundsMode.smooth,
+      ),
+      const VideoSize(1280, 720),
+      reason: '流畅档保持 §12.7 的老行为：绝不向设备要放大（贴原生还会吸原生）',
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: retinaViewport,
+        native: native,
+        mode: VideoBoundsMode.balanced,
+      ),
+      const VideoSize(1920, 1072),
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: retinaViewport,
+        native: native,
+        mode: VideoBoundsMode.maximum,
       ),
       const VideoSize(2560, 1440),
       reason: '窗口再大也只到原生 2 倍：容器里的软编码器扛不住更高',
     );
+  });
+
+  test('画面区本来就没超过原生 1.5 倍时：后两档收敛到同一个边界（此时已经不用放大）', () {
+    const native = VideoSize(1280, 720);
+    // 1898x853 是 §12.7 那次真机实测的 Ui 视口（同比例收框后 1516x853，仅 1.18 倍原生）。
     expect(
       StreamSessionService.clampBoundsForMode(
         viewport: const VideoSize(1898, 853),
         native: native,
-        mode: VideoBoundsMode.nativeCap,
+        mode: VideoBoundsMode.balanced,
       ),
-      const VideoSize(1280, 720),
-      reason: '省设备算力模式保持原行为（AGENTS §12.7：绝不向设备要放大）',
+      const VideoSize(1504, 848),
+    );
+    expect(
+      StreamSessionService.clampBoundsForMode(
+        viewport: const VideoSize(1898, 853),
+        native: native,
+        mode: VideoBoundsMode.maximum,
+      ),
+      const VideoSize(1504, 848),
+      reason: '1.5 倍上限没顶到、2 倍上限也没顶到 → 两档都按画面区要，'
+          '面板里的"本地放大倍率"会显示成 1.00x（不是没生效，是已经够了）',
     );
   });
 
@@ -509,7 +564,7 @@ void main() {
     );
   });
 
-  test('★ 切换清晰优先：立刻按当前视口补发一条参数（尺寸没变也要发）', () async {
+  test('★ 切换画质档位：立刻按当前视口补发一条参数（尺寸没变也要发）', () async {
     await service.start(target);
     transport.emit(loadInitialInfoFixture());
     await pumpEventQueue();
@@ -521,32 +576,108 @@ void main() {
     expect(
       settingsOf(framesBefore.last).bounds,
       const VideoSize(1280, 720),
-      reason: '默认省设备算力：封顶到设备原生',
+      reason: '服务层默认最保守（流畅档 = 不向设备要放大）；App 层会在 connect 时'
+          '覆盖成"最高画质"（见 PlayerViewModel.defaultBoundsMode）',
     );
 
-    final result = service.setBoundsMode(VideoBoundsMode.viewport);
-    expect(result.isSuccess, isTrue);
-    final framesAfter = framesOfType(
-      ControlMessageType.changeStreamParameters.code,
-    );
+    var previous = framesBefore.length;
+    // 逐档切过去：每一档都必须**立刻补发一条**，否则用户点了下拉看不到任何变化。
+    for (final (VideoBoundsMode mode, VideoSize expected) in <(
+      VideoBoundsMode,
+      VideoSize,
+    )>[
+      (VideoBoundsMode.maximum, const VideoSize(1504, 848)),
+      (VideoBoundsMode.smooth, const VideoSize(1280, 720)),
+      (VideoBoundsMode.balanced, const VideoSize(1504, 848)),
+    ]) {
+      final result = service.setBoundsMode(mode);
+      expect(result.isSuccess, isTrue);
+      final frames = framesOfType(
+        ControlMessageType.changeStreamParameters.code,
+      );
+      expect(
+        frames,
+        hasLength(previous + 1),
+        reason: '切到 ${mode.label} 必须马上补发一条',
+      );
+      expect(
+        settingsOf(frames.last).bounds,
+        expected,
+        reason: '${mode.label} 的边界不对',
+      );
+      previous = frames.length;
+    }
+  });
+
+  test('★ 后建解码器的补喂缓冲：参数集 + 从最近一个 IDR 开始的帧（web 端全黑的根因）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), isEmpty, reason: '还没收到任何帧');
+
+    // 真实顺序（夹具）：先一条纯参数集（SPS+PPS），再 IDR，再若干 P 帧。
+    final fixture = loadVideoFrameFixture();
+    final parameterSets = fixture[0];
+    final idr = fixture[1];
+    final pFrame = Uint8List.fromList(<int>[0, 0, 0, 1, 0x41, 1, 2, 3]);
+
+    transport.emit(parameterSets);
+    await pumpEventQueue();
+    // 只有参数集：能补，但没有参考帧，序列只有它自己。
+    expect(service.replayFramesForNewDecoder(), hasLength(1));
+
+    transport.emit(pFrame);
+    transport.emit(pFrame);
+    await pumpEventQueue();
     expect(
-      framesAfter,
-      hasLength(framesBefore.length + 1),
-      reason: '切换模式必须马上补发一条，否则用户点了开关看不到任何变化',
-    );
-    expect(
-      settingsOf(framesAfter.last).bounds,
-      const VideoSize(1504, 848),
-      reason: '清晰优先：按画面区像素编码（不再封顶到 1280x720）',
+      service.replayFramesForNewDecoder(),
+      hasLength(1),
+      reason: 'IDR 之前的 P 帧不能补（没有参考帧，补了也解不出来）',
     );
 
-    // 切回去也要立刻生效，而且回到原生封顶。
-    service.setBoundsMode(VideoBoundsMode.nativeCap);
-    final framesBack = framesOfType(
-      ControlMessageType.changeStreamParameters.code,
+    transport.emit(idr);
+    transport.emit(pFrame);
+    await pumpEventQueue();
+    final replay = service.replayFramesForNewDecoder();
+    expect(replay, hasLength(3), reason: '参数集 + IDR + IDR 之后的 P 帧');
+    expect(replay.first, parameterSets, reason: '参数集必须排在最前面：web 端靠它算 codec 串');
+    expect(replay[1], idr);
+
+    // 再来一个 IDR：缓冲只保留最近那个 GOP。
+    transport.emit(idr);
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), hasLength(2));
+  });
+
+  test('★ 转屏不改编码边界：一条消息都不发（服务端不会重建编码器）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    // 手机竖屏：402x698 逻辑 @3 → 1206x2094 物理。
+    service.applyViewportBounds(width: 1206, height: 2094);
+    final afterPortrait = transport.sent.length;
+    expect(
+      settingsOf(
+        framesOfType(ControlMessageType.changeStreamParameters.code).last,
+      ).bounds,
+      const VideoSize(1280, 720),
+      reason: '竖屏贴原生 → 吸附成原生（免得转屏时来回改边界）',
     );
-    expect(framesBack, hasLength(framesAfter.length + 1));
-    expect(settingsOf(framesBack.last).bounds, const VideoSize(1280, 720));
+
+    // 转成横屏：874x402 逻辑 @3 → 2622x1206 物理。
+    service.applyViewportBounds(width: 2622, height: 1206);
+    expect(
+      transport.sent.length,
+      afterPortrait,
+      reason: '转屏前后边界都是原生 1280x720，去重应该吃掉第二条：'
+          '每多发一条服务端就重建一次编码器，重建后要等新的 IDR（10s）→ 画面停住几十秒',
+    );
+    expect(
+      service.viewportUpdateSequence,
+      0,
+      reason: '连竖屏那次都不需要补发：首发用的服务端边界收敛后本来就是原生 1280x720，'
+          '转屏前后都一样 → 编码器全程不重建',
+    );
   });
 
   test('已发过参数后断开再改尺寸：返回失败而不是抛异常', () async {

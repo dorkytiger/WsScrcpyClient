@@ -305,9 +305,11 @@ class StreamSessionService {
   static const int webPlayerPreferredMaxFps = 60;
   static const int webPlayerPreferredIFrameInterval = 10;
 
-  /// 编码边界策略（默认 [VideoBoundsMode.nativeCap]；见该枚举的注释）。
+  /// 画质档位（默认 [VideoBoundsMode.balanced]；见该枚举的注释）。
   VideoBoundsMode get boundsMode => _boundsMode;
-  VideoBoundsMode _boundsMode = VideoBoundsMode.nativeCap;
+  // 服务层默认最保守（不向设备要放大）；App 层会在 connect 时按
+  // `PlayerViewModel.defaultBoundsMode`（= 最高画质）覆盖它，见 AGENTS §16.3。
+  VideoBoundsMode _boundsMode = VideoBoundsMode.smooth;
 
   /// 切换编码边界策略：**立刻**按当前视口补发一条参数（用户点了开关就要马上看到效果）。
   ///
@@ -610,16 +612,17 @@ class StreamSessionService {
   }) => clampBoundsForMode(
     viewport: viewport,
     native: native,
-    mode: VideoBoundsMode.nativeCap,
+    mode: VideoBoundsMode.smooth,
   );
 
-  /// 按 [mode] 收敛编码边界（两种模式的差别只在"允许放到多大"）。
+  /// 按画质档位 [mode] 收敛编码边界（三档的差别只在"允许放到多大"）。
   ///
-  /// - [VideoBoundsMode.nativeCap]：上限 = 设备原生（默认，AGENTS §12.7）；
-  /// - [VideoBoundsMode.viewport]：上限 = 原生 × [VideoBoundsMode.maxUpscale]，
-  ///   也就是**允许请设备多编像素**，换来客户端不必把画面拉大（清晰优先）。
+  /// - [VideoBoundsMode.smooth]：上限 = 设备原生（最省设备算力）；
+  /// - [VideoBoundsMode.balanced]：上限 = 原生 × 1.5（默认）；
+  /// - [VideoBoundsMode.maximum]：上限 = 原生 × 2（最清晰，设备最吃力）。
   ///
-  /// 两种模式都保留前两步（同比例收框 + 16 宏块对齐）——那两步与"清晰度取舍"无关，
+  /// 上限来自档位自己的 [VideoBoundsMode.upscaleCap]，这里不再写死系数。
+  /// 三档都保留前两步（同比例收框 + 16 宏块对齐）——那两步与"清晰度取舍"无关，
   /// 是"别把分辨率压死"和"别产出解码器不认的码流"（§12.8）的硬要求。
   static VideoSize clampBoundsForMode({
     required VideoSize viewport,
@@ -642,10 +645,9 @@ class StreamSessionService {
       boxWidth = boxHeight * nativeRatio;
     }
 
-    // 第 2 步：按模式定上限（nativeCap = 原生；viewport = 原生 × maxUpscale）。
-    final upscale = mode == VideoBoundsMode.viewport
-        ? VideoBoundsMode.maxUpscale
-        : 1;
+    // 第 2 步：按档位定上限（流畅=原生；推荐=原生×1.5；最高画质=原生×2）。
+    // 上限系数是**档位自己的属性**，别在这里写死，否则加档位时会漏改（§16.3）。
+    final upscale = mode.upscaleCap;
     final capWidth = native.width * upscale;
     final capHeight = native.height * upscale;
     final scale = math.min(
@@ -668,8 +670,8 @@ class StreamSessionService {
     //
     // 代价可控：只有"视口已经 ≥ 原生的 [snapToNativeRatio]"才吸（见该常量），
     // 所以最多多要不到 23% 的像素，绝不会出现"小窗口让设备编原生"的白烧。
-    if (mode == VideoBoundsMode.nativeCap &&
-        aligned.width >= native.width * snapToNativeRatio &&
+    if (mode.snapsToNative &&
+        aligned.width >= native.width * VideoBoundsMode.snapToNativeRatio &&
         aligned.height <= native.height) {
       return alignToMacroblock(native);
     }
@@ -821,9 +823,8 @@ class StreamSessionService {
       _log(
         '请求的编码边界 ${requestedBounds!.width}x${requestedBounds.height} 收敛/对齐为 '
         '${effectiveBounds.width}x${effectiveBounds.height}'
-        '（模式=${_boundsMode.label}：设备原生 ${nativeSize.width}x${nativeSize.height}'
-        '${_boundsMode == VideoBoundsMode.viewport ? ' ×${VideoBoundsMode.maxUpscale} 上限' : ' 封顶'}'
-        ' + 与设备同比例 + 16 宏块对齐，见 AGENTS §12.7/§12.8）',
+        '（画质=${_boundsMode.label}：设备原生 ${nativeSize.width}x${nativeSize.height}，'
+        '上限 ${_boundsMode.upscaleLabel} + 与设备同比例 + 16 宏块对齐，见 AGENTS §16.3）',
       );
     }
     final normalized = baseWithDefaults.copyWith(

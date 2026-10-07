@@ -125,14 +125,16 @@ class PlayerViewModel extends ChangeNotifier {
   /// 编码边界策略的默认值：**清晰优先**（桌面与移动一样）。
   ///
   /// 2026-10-07 用户实测（手机横屏）：画面区物理 `2280x1206`，而"省设备算力"把边界封顶在
-  /// 设备原生 `1280x720` → 本地放大 **1.68x**（糊）；切到清晰优先后请求 `2144x1200`
-  /// （≈ 画面区的物理像素），放大倍率才会回到 ~1.0。
-  /// 桌面端同理（"网页端完爆桌面端"就是它按自己的视口尺寸要像素）。
+  /// 三档量级（设备原生 1280x720、画面区 2144x1206 物理像素时）：
+  /// `smooth` → 1280x720（本地放大 ~1.7x，省设备算力）；
+  /// `balanced` → 1920x1072（放大 ~1.1x）；
+  /// `maximum` → 2144x1200（几乎 1:1）——**默认就是它**，因为 2026-10-07 之前
+  /// 用户已经验证过这一档满意（"清晰优先"那版行为）；设备掉帧时再往下调。
   ///
-  /// 风险与退路：AGENTS §12.7 记过"向设备要更多像素 → 帧间隔 53–166ms"，
-  /// 所以"更多"面板里保留一键切回 `nativeCap`；日志里的
-  /// `帧吞吐/s：收到 +N` 与 `画面诊断…本地放大 x.xx 倍` 就是判据。
-  VideoBoundsMode get defaultBoundsMode => VideoBoundsMode.viewport;
+  /// 用户 2026-10-07 反馈"清晰优先并不能切换画质"就是因为原来只有两档，
+  /// 而且在不少设备上两档算出来是同一个边界 —— 现在是按倍数分档 + 面板显示实测数字，
+  /// 见 [VideoBoundsMode] 的注释与 AGENTS §16.3。
+  VideoBoundsMode get defaultBoundsMode => VideoBoundsMode.maximum;
 
   /// 是否在连接建立后自动唤醒被控设备屏幕（默认开，见 `AppDefaults.wakeDeviceOnConnect`）。
   bool get wakeOnConnect => _sessionService.wakeOnConnect;
@@ -395,6 +397,8 @@ class PlayerViewModel extends ChangeNotifier {
       final physicalWidth = logical.width * _lastViewDevicePixelRatio;
       final physicalHeight = logical.height * _lastViewDevicePixelRatio;
       final physicalScale = viewport.scale * _lastViewDevicePixelRatio;
+      // 存一份给"更多"面板显示：切画质档位后能立刻看到"本地放大几倍"变了没有。
+      _localUpscale = physicalScale;
       buffer.write(
         '，控件 ${logical.width.toStringAsFixed(0)}x${logical.height.toStringAsFixed(0)} 逻辑'
         '= ${physicalWidth.toStringAsFixed(0)}x${physicalHeight.toStringAsFixed(0)} 物理',
@@ -456,6 +460,25 @@ class PlayerViewModel extends ChangeNotifier {
 
   /// 编码边界策略（清晰度取舍；见 [VideoBoundsMode]）。
   VideoBoundsMode get boundsMode => _sessionService.boundsMode;
+
+  /// 当前**生效**的编码边界（服务端真正收到的那组像素），没连上时为 `null`。
+  VideoSize? get effectiveBounds => _sessionService.lastEffectiveBounds;
+
+  /// 本地放大倍率：> 1 就是把流拉大了（越大越糊），≈ 1 最理想（见 `画面诊断`）。
+  double? get localUpscale => _localUpscale;
+  double? _localUpscale;
+
+  /// 面板里给"画质"那一行看的实测摘要：
+  /// `编码 1920x1072 · 本地放大 1.12x`；还没数据时给出原因。
+  String get qualitySummary {
+    final bounds = effectiveBounds;
+    if (bounds == null) {
+      return '尚未下发编码参数（连上后显示生效边界）';
+    }
+    final upscale = _localUpscale;
+    return '编码 ${bounds.width}x${bounds.height}'
+        '${upscale == null ? '' : ' · 本地放大 ${upscale.toStringAsFixed(2)}x'}';
+  }
 
   /// 切换"省设备算力 / 清晰优先"。
   ///

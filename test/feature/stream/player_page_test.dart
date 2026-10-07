@@ -994,33 +994,40 @@ void main() {
 
       expect(
         viewModel.boundsMode,
-        VideoBoundsMode.viewport,
-        reason: '桌面端默认清晰优先（网页端就是按自己的视口尺寸要像素的）',
+        VideoBoundsMode.maximum,
+        reason: '默认就是"最高画质"（2026-10-07 之前那版"清晰优先"的行为，用户验证过满意）',
       );
       final bounds = lastSettings(transport)?.bounds;
       expect(bounds, isNotNull);
       expect(
         bounds!.width,
         greaterThan(1280),
-        reason: '清晰优先下应该请设备多编像素（设备原生 1280x720），实际 $bounds',
+        reason: '最高画质下应该请设备多编像素（设备原生 1280x720），实际 $bounds',
       );
 
-      // 面板里的开关能切回"省设备算力"，并且立刻补发一条封顶到原生的参数。
+      // 面板里是三档下拉：能往下切到"流畅运行"，并且**立刻**补发一条封顶到原生的参数。
       await tester.tap(find.text('更多'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      final switchFinder = find.text('清晰优先（按画面区像素编码）');
-      await tester.ensureVisible(switchFinder);
+      final dropdown = find.byType(DropdownButton<VideoBoundsMode>);
+      await tester.ensureVisible(dropdown);
       await tester.pump();
-      await tester.tap(switchFinder);
+      await tester.tap(dropdown);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      // 下拉菜单里三档都在。
+      expect(find.text('流畅运行'), findsWidgets);
+      expect(find.text('推荐'), findsWidgets);
+      expect(find.text('最高画质'), findsWidgets);
+      await tester.tap(find.text('流畅运行').last);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
 
-      expect(viewModel.boundsMode, VideoBoundsMode.nativeCap);
+      expect(viewModel.boundsMode, VideoBoundsMode.smooth);
       expect(
         lastSettings(transport)?.bounds,
         const VideoSize(1280, 720),
-        reason: '关掉清晰优先后回到"绝不向设备要放大"（AGENTS §12.7）',
+        reason: '"流畅运行"回到"绝不向设备要放大"（AGENTS §12.7）',
       );
     } finally {
       debugDefaultTargetPlatformOverride = null;
@@ -1049,11 +1056,70 @@ void main() {
       final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
       expect(
         viewModel.boundsMode,
-        VideoBoundsMode.viewport,
-        reason: '手机横屏画面区物理 2280x1206，封顶到原生 1280x720 会被放大 1.68x（糊）',
+        VideoBoundsMode.maximum,
+        reason: '手机横屏画面区物理 2280x1206；默认最高画质，封顶到原生会被放大 1.68x（糊）',
       );
       // 874x402 逻辑 @3 = 2622x1206 物理 → 按设备比例收框 2144x1206 → 上限原生×2 → 2144x1200。
       expect(lastSettings(transport)?.bounds, const VideoSize(2144, 1200));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('★ 画质：下拉显示三档 + 当前生效边界与本地放大倍率（切了有没有生效一眼可查）', (
+    WidgetTester tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    landscapePhone(tester);
+    mockVideoChannel((MethodCall call) async {
+      switch (call.method) {
+        case 'create':
+          return <Object?, Object?>{'textureId': 43};
+        case 'pushFrame':
+          return <Object?, Object?>{'width': 1280, 'height': 720};
+        case 'getSize':
+          return <Object?, Object?>{'width': 1280, 'height': 720};
+        default:
+          return null;
+      }
+    });
+    try {
+      final transport = _FakeTransport();
+      final viewModel = await pumpPlayer(
+        tester,
+        transport,
+        withVideoFrame: true,
+      );
+
+      await tester.tap(find.text('更多'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.ensureVisible(find.byType(DropdownButton<VideoBoundsMode>));
+      await tester.pump();
+
+      // 面板里必须**同时**给出：当前档位 + 生效边界 + 本地放大倍率。
+      // 这三样是"切了画质到底有没有生效"的唯一判据（用户 2026-10-07 反馈看不到变化）。
+      expect(find.text('画质'), findsOneWidget);
+      expect(viewModel.qualitySummary, contains('编码 '));
+      expect(find.textContaining('编码 '), findsOneWidget);
+
+      // 切到"流畅运行"后，摘要里的编码边界要跟着变小（而不是只有开关状态变了）。
+      final before = viewModel.qualitySummary;
+      viewModel.setBoundsMode(VideoBoundsMode.smooth);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(viewModel.boundsMode, VideoBoundsMode.smooth);
+      expect(
+        lastSettings(transport)?.bounds,
+        const VideoSize(1280, 720),
+        reason: '切档必须真的下发新的编码边界',
+      );
+      expect(
+        viewModel.qualitySummary,
+        isNot(before),
+        reason: '摘要要跟着变，否则用户还是看不出切没生效',
+      );
+      expect(tester.takeException(), isNull);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

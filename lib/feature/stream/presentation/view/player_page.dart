@@ -1043,25 +1043,37 @@ class _MoreActionsSheet extends StatelessWidget {
               ),
             ),
             const Divider(height: 1),
-            // 清晰度：网页端之所以看着更清楚，是因为它把**浏览器视口尺寸**当编码边界发过去，
-            // 而我们原来一律封顶到设备原生（§12.7 是为了不许设备多编像素）。
-            // 这个开关把选择权还给用户：清晰优先 = 允许设备多编到原生 2 倍像素。
+            // 画质档位（三档下拉）：网页端之所以看着更清楚，是因为它把**浏览器视口尺寸**
+            // 当编码边界发过去，而我们原来一律封顶到设备原生（§12.7 是为了不许设备多编像素）。
+            // 但"一个清晰优先开关"在不少设备上两档会算出同一个边界（用户实测"切了没变化"），
+            // 所以改成按"最多编到原生的几倍"分三档，并把**生效边界 + 本地放大倍率**摆出来，
+            // 切了有没有生效一眼可查（见 AGENTS §16.3）。
             ListenableBuilder(
               listenable: viewModel,
-              builder: (BuildContext context, _) => SwitchListTile(
-                value: viewModel.boundsMode == VideoBoundsMode.viewport,
-                onChanged: (bool clearFirst) => viewModel.setBoundsMode(
-                  clearFirst
-                      ? VideoBoundsMode.viewport
-                      : VideoBoundsMode.nativeCap,
-                ),
+              builder: (BuildContext context, _) => ListTile(
                 contentPadding: const EdgeInsets.symmetric(
                   horizontal: AppSpacing.lg,
                 ),
-                title: const Text('清晰优先（按画面区像素编码）'),
+                leading: const Icon(Icons.high_quality_outlined),
+                title: const Text('画质'),
                 subtitle: Text(
-                  '${VideoBoundsMode.viewport.description}；'
-                  '关掉 = ${VideoBoundsMode.nativeCap.description}',
+                  '${viewModel.boundsMode.description}\n${viewModel.qualitySummary}',
+                ),
+                isThreeLine: true,
+                trailing: DropdownButton<VideoBoundsMode>(
+                  value: viewModel.boundsMode,
+                  onChanged: (VideoBoundsMode? mode) {
+                    if (mode != null) {
+                      viewModel.setBoundsMode(mode);
+                    }
+                  },
+                  items: <DropdownMenuItem<VideoBoundsMode>>[
+                    for (final mode in VideoBoundsMode.values)
+                      DropdownMenuItem<VideoBoundsMode>(
+                        value: mode,
+                        child: Text(mode.label),
+                      ),
+                  ],
                 ),
               ),
             ),
