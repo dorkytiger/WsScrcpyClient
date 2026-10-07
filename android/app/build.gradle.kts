@@ -36,6 +36,22 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    packaging {
+        jniLibs {
+            // 不剥离 .so 里的调试符号。**这不是风格偏好，是 CI 能不能构建的前提**：
+            //   · 本项目没有原生代码，.so 全是 Flutter 引擎的（上游发布时已经 strip 过），
+            //     再 strip 一次的收益≈0；
+            //   · 而 AGP 的 `stripReleaseDebugSymbols` 固定调用 **NDK 里的 llvm-strip**
+            //     （`ndk/<版本>/toolchains/llvm/prebuilt/<host>/bin/llvm-strip`）；
+            //   · 我们的 CI 里只有 NDK **标记文件**、没有真 NDK
+            //     （为什么要标记见 docs/ci.md 第八个坑；真 NDK 约 1GB 且在连不通的 dl.google.com 上），
+            //     于是那个任务会以 "A problem occurred starting process ... llvm-strip" 直接挂。
+            // 列成 **/*.so 后该任务没有可处理的目标 → 不再调用 llvm-strip。
+            // 代价：APK 里保留引擎库自带的符号（引擎库本来就是 stripped 的，实测体积无感）。
+            keepDebugSymbols += "**/*.so"
+        }
+    }
 }
 
 kotlin {
