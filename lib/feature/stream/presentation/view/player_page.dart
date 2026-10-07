@@ -237,58 +237,76 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 横屏下横向空间富余（874 宽里画面只用 ~500）、纵向极缺（402 点里
   /// 顶栏 56 + 快捷栏 64 就吃掉 30%）。把快捷栏竖过来正好把浪费的横向空间
   /// 换成画面的高度：画面从 501x282 变成约 615x346（**像素 +50%**），而且不裁切。
-  Widget _landscapeBody(StreamSessionSnapshot data) => Row(
-    children: <Widget>[
-      Expanded(
-        child: Stack(
-          children: <Widget>[
-            Positioned.fill(
-              child: _VideoStage(
-                snapshot: data,
-                viewModel: widget.viewModel,
-                focusNode: _keyboardFocusNode,
-              ),
+  Widget _landscapeBody(StreamSessionSnapshot data) {
+    // 缺口安全区：iOS 横屏左右**都**会报（见 §9.4），所以避让时左右都让，
+    // 填满时一点不让。竖屏不走这里（顶栏本身就在缺口下面）。
+    final EdgeInsets cutout = widget.viewModel.fillCutout
+        ? EdgeInsets.zero
+        : EdgeInsets.only(
+            // 用 `padding` 而不是 `viewPadding`：与 `SafeArea` 同一个语义来源
+            // （键盘等消费掉的安全区不该再算一遍）。
+            left: MediaQuery.paddingOf(context).left,
+            right: MediaQuery.paddingOf(context).right,
+          );
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Padding(
+            // 顶栏浮层、日志面板、常驻小圆钮都在这个 Stack 里 —— 一起避让，
+            // 免得那个圆钮正好压在灵动岛下面点不着。
+            padding: cutout,
+            child: Stack(
+              children: <Widget>[
+                Positioned.fill(
+                  child: _VideoStage(
+                    snapshot: data,
+                    viewModel: widget.viewModel,
+                    focusNode: _keyboardFocusNode,
+                  ),
+                ),
+                if (_showLogs)
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _LogPanel(logs: widget.viewModel.logs),
+                  ),
+                if (_chromeVisible)
+                  Align(
+                    alignment: Alignment.topCenter,
+                    child: _ChromeBar(
+                      title: widget.title,
+                      // 横屏没有 AppBar → 也就没有返回箭头（浏览器更没有系统返回键）。
+                      // 原生端靠系统返回/手势，web 上必须给一个入口，否则回不到设备列表。
+                      onBack: () => Navigator.of(context).maybePop(),
+                      fitMode: widget.viewModel.videoFitMode,
+                      onToggleFit: () => widget.viewModel.setVideoFitMode(
+                        widget.viewModel.videoFitMode.toggled,
+                      ),
+                      showLogs: _showLogs,
+                      onToggleLogs: () =>
+                          setState(() => _showLogs = !_showLogs),
+                      onHide: () => setState(() => _chromeVisible = false),
+                    ),
+                  )
+                else
+                  // 常驻的小入口（半透明、只占左上角一点）。
+                  // 刻意**不做**"点画面唤出"：画面上的点击是要发给被控设备的。
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.all(AppSpacing.xs),
+                      child: _ChromeHandle(
+                        onPressed: () => setState(() => _chromeVisible = true),
+                      ),
+                    ),
+                  ),
+              ],
             ),
-            if (_showLogs)
-              Align(
-                alignment: Alignment.bottomCenter,
-                child: _LogPanel(logs: widget.viewModel.logs),
-              ),
-            if (_chromeVisible)
-              Align(
-                alignment: Alignment.topCenter,
-                child: _ChromeBar(
-                  title: widget.title,
-                  // 横屏没有 AppBar → 也就没有返回箭头（浏览器更没有系统返回键）。
-                  // 原生端靠系统返回/手势，web 上必须给一个入口，否则回不到设备列表。
-                  onBack: () => Navigator.of(context).maybePop(),
-                  fitMode: widget.viewModel.videoFitMode,
-                  onToggleFit: () => widget.viewModel.setVideoFitMode(
-                    widget.viewModel.videoFitMode.toggled,
-                  ),
-                  showLogs: _showLogs,
-                  onToggleLogs: () => setState(() => _showLogs = !_showLogs),
-                  onHide: () => setState(() => _chromeVisible = false),
-                ),
-              )
-            else
-              // 常驻的小入口（半透明、只占左上角一点）。
-              // 刻意**不做**"点画面唤出"：画面上的点击是要发给被控设备的。
-              Align(
-                alignment: Alignment.topLeft,
-                child: Padding(
-                  padding: const EdgeInsets.all(AppSpacing.xs),
-                  child: _ChromeHandle(
-                    onPressed: () => setState(() => _chromeVisible = true),
-                  ),
-                ),
-              ),
-          ],
+          ),
         ),
-      ),
-      _quickBar(data, axis: Axis.vertical),
-    ],
-  );
+        _quickBar(data, axis: Axis.vertical),
+      ],
+    );
+  }
 }
 
 /// 画面区域 + 输入层（M3）。
@@ -375,9 +393,8 @@ class _VideoStage extends StatelessWidget {
                   'fit=${fit.name}，scale=${viewport.scale.toStringAsFixed(3)}'
             : '输入层**未接上**（点画面不会有任何反应）：原因='
                   '${viewport == null ? '视口不可用（视频 ${size?.width}x${size?.height} / '
-                        '控件 ${constraints.maxWidth.toStringAsFixed(0)}x'
-                        '${constraints.maxHeight.toStringAsFixed(0)}）'
-                      : '会话状态=${snapshot.status.description}（${snapshot.status.name}）'}',
+                            '控件 ${constraints.maxWidth.toStringAsFixed(0)}x'
+                            '${constraints.maxHeight.toStringAsFixed(0)}）' : '会话状态=${snapshot.status.description}（${snapshot.status.name}）'}',
       );
     }
 
@@ -398,7 +415,9 @@ class _VideoStage extends StatelessWidget {
             child: ClipRect(
               child: SizedBox.expand(
                 child: FittedBox(
-                  fit: fit == VideoFitMode.cover ? BoxFit.cover : BoxFit.contain,
+                  fit: fit == VideoFitMode.cover
+                      ? BoxFit.cover
+                      : BoxFit.contain,
                   child: SizedBox(
                     width: (size?.width ?? 1280).toDouble(),
                     height: (size?.height ?? 720).toDouble(),
@@ -555,9 +574,7 @@ class _VideoPlaceholder extends StatelessWidget {
                   Text(
                     // 文案要跟着实现走：解码已经全平台都有了（Linux 除外），
                     // 所以这里说的是"正在解码/还没轮到渲染"，而不是"还没实现"。
-                    snapshot.hasVideo
-                        ? '已收到视频数据，正在解码…'
-                        : '已连接，等待视频数据',
+                    snapshot.hasVideo ? '已收到视频数据，正在解码…' : '已连接，等待视频数据',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.titleMedium?.copyWith(
                       color: theme.colorScheme.onInverseSurface,
@@ -846,11 +863,16 @@ class _QuickBar extends StatelessWidget {
     return Material(
       color: theme.colorScheme.surfaceContainerHigh,
       child: SafeArea(
-        // 竖排时右侧要避开 Home Indicator（横屏时它在右边）。
-        right: isVertical,
-        left: !isVertical,
+        // ★ 横屏（竖排栏）**不再让左右安全区**：iOS 横屏会把刘海/灵动岛那一侧的
+        //   安全区**左右都报成 ~59 点**（系统不告诉你缺口在哪侧），照单全收的话
+        //   这条栏会凭空胖 59 点 —— 那就是用户看到的"右边空格太大"（2026-10-07 反馈）。
+        //   按钮竖排在**右边缘、竖直居中**，而灵动岛只占顶部 ~37 点，够不到它们；
+        //   就算设备把缺口放在右侧也压不到按钮（详见 AGENTS §9.4）。
+        // 竖屏（横排栏）保留底部安全区，别压到 Home Indicator。
+        right: false,
+        left: false,
         top: false,
-        bottom: false,
+        bottom: !isVertical,
         child: Padding(
           // 竖排时把内边距也收紧：横屏下这一条每一点宽度都是从画面里抠出来的。
           padding: EdgeInsets.symmetric(
@@ -1000,6 +1022,24 @@ class _MoreActionsSheet extends StatelessWidget {
                 ),
                 title: const Text('铺满屏幕'),
                 subtitle: const Text('裁掉画面上下边缘，换掉左右的黑边；不改设备那边的编码'),
+              ),
+            ),
+            const Divider(height: 1),
+            // 灵动岛/刘海避让（仅横屏有效）：iOS 横屏左右都报 ~59 点安全区，
+            // 让不让它由用户定 —— 默认避让（缺口绝不压内容），填满则铺到整块屏幕。
+            ListenableBuilder(
+              listenable: viewModel,
+              builder: (BuildContext context, _) => SwitchListTile(
+                value: viewModel.fillCutout,
+                onChanged: viewModel.setFillCutout,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.lg,
+                ),
+                title: const Text('画面填满到灵动岛'),
+                subtitle: const Text(
+                  '关闭（默认）：横屏时画面避开刘海/灵动岛那条安全区，缺口不会压住画面；'
+                  '打开：铺满整块屏幕，缺口可能遮住画面一角',
+                ),
               ),
             ),
             const Divider(height: 1),

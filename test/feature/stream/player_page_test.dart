@@ -231,6 +231,107 @@ void main() {
     addTearDown(tester.view.reset);
   }
 
+  /// iPhone 横屏 + **刘海/灵动岛**：iOS 会把缺口那一侧的左右安全区**都**报出来
+  /// （~59pt），底部还有 Home Indicator（21pt）。用户 2026-10-07 反馈的两个问题
+  /// （"右边空格太大"、"灵动岛挡住了"）只有在这个 padding 下才复现。
+  void landscapePhoneWithCutout(WidgetTester tester) {
+    tester.view.physicalSize = const Size(874 * 3, 402 * 3);
+    tester.view.devicePixelRatio = 3;
+    tester.view.padding = const FakeViewPadding(
+      left: 59 * 3,
+      right: 59 * 3,
+      bottom: 21 * 3,
+    );
+    addTearDown(tester.view.reset);
+  }
+
+  testWidgets('★ 横屏 + 灵动岛：画面避让缺口（左边不被压），快捷栏也不再凭空占 59 点', (
+    WidgetTester tester,
+  ) async {
+    landscapePhoneWithCutout(tester);
+    mockVideoChannel((MethodCall call) async {
+      if (call.method == 'create') {
+        return <Object?, Object?>{'textureId': 9};
+      }
+      return null;
+    });
+    final transport = _FakeTransport();
+    final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
+    expect(viewModel.fillCutout, isFalse, reason: '默认必须是避让');
+
+    final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    final video = tester.getRect(find.byType(Texture));
+
+    // ① 画面整体在缺口右侧 → 灵动岛压不到内容（缺口在左；iOS 左右都报，所以右侧同理）。
+    expect(
+      video.left,
+      greaterThanOrEqualTo(59),
+      reason: '画面钻到灵动岛下面了：left=${video.left}',
+    );
+    // ② 画面仍然撑满高度（别为了避让把画面缩一圈）。
+    expect(video.height, greaterThan(screen.height * 0.9));
+
+    // ③ 快捷栏不再吃掉那 59 点：按钮应该贴着右边缘（原来离右边 ~59+）。
+    final back = tester.getRect(find.text('返回'));
+    expect(
+      screen.width - back.right,
+      lessThan(30),
+      reason: '右侧那条空带又回来了：离右边 ${screen.width - back.right} 点',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('★ 打开"画面填满到灵动岛"：画面铺到左右边缘（缺口可能遮一角）', (
+    WidgetTester tester,
+  ) async {
+    landscapePhoneWithCutout(tester);
+    mockVideoChannel((MethodCall call) async {
+      if (call.method == 'create') {
+        return <Object?, Object?>{'textureId': 9};
+      }
+      return null;
+    });
+    final transport = _FakeTransport();
+    final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
+
+    viewModel.setFillCutout(true);
+    await tester.pump();
+    // 布局变了会走视口防抖（350ms）→ 参数下发；把计时器跑完，别留 pending timer。
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final video = tester.getRect(find.byType(Texture));
+    expect(
+      video.left,
+      lessThan(59),
+      reason: '填满模式应该铺到左边，实际 left=${video.left}',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('"更多"面板里有"画面填满到灵动岛"开关，默认关且能打开', (WidgetTester tester) async {
+    landscapePhoneWithCutout(tester);
+    final transport = _FakeTransport();
+    final viewModel = await pumpPlayer(tester, transport);
+
+    await tester.tap(find.text('更多'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final switchFinder = find.ancestor(
+      of: find.text('画面填满到灵动岛'),
+      matching: find.byType(SwitchListTile),
+    );
+    expect(switchFinder, findsOneWidget);
+    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+
+    await tester.tap(switchFinder);
+    await tester.pump();
+    expect(viewModel.fillCutout, isTrue);
+    // 同上：等防抖计时器跑完，否则 teardown 会报 "A Timer is still pending"。
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('★ 横屏手机尺寸下：画面占位不溢出', (WidgetTester tester) async {
     landscapePhone(tester);
     final transport = _FakeTransport();

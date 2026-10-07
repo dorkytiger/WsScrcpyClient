@@ -486,6 +486,30 @@ class PlayerViewModel extends ChangeNotifier {
   VideoFitMode get videoFitMode => _videoFitMode;
   VideoFitMode _videoFitMode = VideoFitMode.contain;
 
+  /// 横屏时画面是否**铺到灵动岛/刘海下面**。
+  ///
+  /// 默认 `false` = 避让：iOS 横屏会把刘海那一侧的安全区**左右都报成 ~59 点**
+  /// （因为系统不告诉你缺口在哪一侧），所以画面左右各让一条，缺口永远压不到内容上。
+  /// 打开 = 画面铺满整块屏幕，缺口可能遮住画面一角（换来左右多 ~118 点宽度，
+  /// 只有"画面宽度受限"的设备上才真的变大——多数手机横屏是高度受限）。
+  ///
+  /// 用户 2026-10-07 反馈"灵动岛挡住了"，就是缺了这条避让。
+  bool get fillCutout => _fillCutout;
+  bool _fillCutout = false;
+
+  /// 切换"画面是否填满到灵动岛/刘海"（只影响横屏；竖屏顶栏本来就避开了）。
+  void setFillCutout(bool value) {
+    if (_fillCutout == value) {
+      return;
+    }
+    _fillCutout = value;
+    _inputLogger.info('画面${value ? '填满到灵动岛（可能被遮一角）' : '避让灵动岛/刘海'}');
+    // 几何变了 → 输入换算与视口上报都要重算（画面区尺寸会变）。
+    _lastRenderDiagnosticsSignature = null;
+    _maybeLogRenderDiagnostics();
+    _notify();
+  }
+
   /// 切换"完整显示 / 铺满裁切"。
   ///
   /// 只影响**本地渲染与坐标换算**，不改任何编码参数——设备那边该编多少还是多少
