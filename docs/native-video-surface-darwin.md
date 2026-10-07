@@ -127,6 +127,37 @@ class NativeVideoSurface extends StatefulWidget {
 4. **测量**（与低延迟讨论共用）：设备上跑毫秒表 → 高帧率拍屏算 input-to-photon，
    记录"纹理路径 vs 原生层路径"的差值（预期 10–25 ms）。
 
+## 5.1 ★ macOS 实测记录（2026-10-07）：接上了但**不显示**
+
+日志（`ScrcpyVideo` 前缀）：
+
+```
+原生视频层视图已创建（macOS）：id=0
+原生视频层已接入：解码结果将直接送 layer（纹理路径让位）
+原生层首帧：layer bounds=(736.0, 400.0) status=1 ready=true     ← status=1 即 rendering
+```
+
+| 已排除 | 结论 |
+|---|---|
+| 布局/尺寸 | `bounds=736x400` 正常 ✓ |
+| layer 状态 | `status=rendering` ✓、`isReadyForMoreMediaData=true` ✓ |
+| 视图注册与工厂 | 创建成功 ✓ |
+
+**⇒ 问题在 CMSampleBuffer/attachment 这一侧**，最可疑的是
+`CMSampleBufferGetSampleAttachmentsArray` + `unsafeBitCast` 那段：如果
+`kCMSampleAttachmentKey_DisplayImmediately` 实际没写进 attachment 字典，
+而我们的 PTS 又是 `.invalid`，layer 就会**永远不显示**（黑）。
+
+**还有一个设计教训（已改）**：我一开始用"成功 enqueue ≥3 帧 + status==rendering"当作
+"原生层在工作"的判据 → 它一成立就把纹理路径切断 → **黑屏且无兜底** ✗。
+"enqueue 成功"≠"看得见"；在没有可靠判据之前，**原生层必须显式开启**
+（`NativeVideoSurface.debugForceEnabled = true`），默认走纹理路径。
+
+待查项（下次继续）：① 用 `CMSetAttachment` 前先 `CFArrayGetValueAtIndex` 的返回是否真的是
+NSMutableDictionary；② 试 `CMSampleBufferSetInvalidateCallback`? 不用；③ 试**不等 vsync**
+的 `layer.flush()` 组合；④ 最后手段：改用 `AVSampleBufferDisplayLayer` 的
+`enqueue` + 明确 PTS（用帧序号造一个递增时间）看是否显示。
+
 ## 6. 分阶段
 
 | 阶段 | 内容 | 状态 |

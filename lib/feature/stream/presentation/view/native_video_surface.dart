@@ -19,9 +19,16 @@ class NativeVideoSurface extends StatelessWidget {
   /// 平台视图类型名，必须与原生 `ScrcpyVideoSurfaceFactory.viewType` 一致。
   static const String viewType = 'ws_scrcpy/video_surface';
 
-  /// 测试钩子：widget 测试断言的是 FlutterTexture 路径的几何，用这个强制走老路。
-  /// （原生层另有"真机截图"验收，见 docs/native-video-surface-darwin.md §5。）
+  /// 测试钩子：强制走 FlutterTexture 路径（widget 测试断言的是那条路的几何）。
   static bool debugForceTexture = false;
+
+  /// 是否允许原生层接管。**默认 false**。
+  ///
+  /// 为什么默认关（2026-10-07 macOS 实测）：原生层"接上了、enqueue 成功、layer status=rendering"
+  /// **不等于"画面真的显示出来"** —— 实测三者都正常但屏幕全黑。当时我按"enqueue 成功"就切断了
+  /// 纹理路径，于是黑屏没有任何兜底。**在没有可靠的"真的显示了"判据之前，原生层必须是显式开**：
+  /// 想试就把它设成 true（配合 docs/native-video-surface-darwin.md 里的待查项）。
+  static bool debugForceEnabled = false;
 
   /// 该平台有没有原生层实现（darwin 先行；Android/Windows 见方案 P2）。
   ///
@@ -33,8 +40,9 @@ class NativeVideoSurface extends StatelessWidget {
       (defaultTargetPlatform == TargetPlatform.iOS ||
           defaultTargetPlatform == TargetPlatform.macOS);
 
-  /// 是否走原生层。
-  static bool get isEnabled => isPlatformSupported && !debugForceTexture;
+  /// 是否走原生层：平台支持 + 显式开启 + 没被测试强制关掉。
+  static bool get isEnabled =>
+      isPlatformSupported && debugForceEnabled && !debugForceTexture;
 
   @override
   Widget build(BuildContext context) {
