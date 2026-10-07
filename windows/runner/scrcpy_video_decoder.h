@@ -44,12 +44,31 @@ struct DecoderStartupTimings {
   long long register_channel_ms = -1;    // 注册 ws_scrcpy/video 通道方法
 };
 
+/// 引擎（Flutter / ANGLE）实际用来渲染的 DXGI 适配器。
+///
+/// **为什么必须把它传进来**：Windows 的 GPU 呈现路（`GpuSurfaceTexture` + DXGI 共享句柄）
+/// 要求"我们建共享纹理的设备"和"引擎打开句柄的设备"在**同一块适配器**上——传统共享句柄
+/// 根本不能跨适配器打开（`tools\run_d3d11_adapter_probe.cmd` 实测：同适配器 3/3 成功、
+/// 跨适配器 0/6），而真机第三次"已发布 67 帧但全黑"的唯一解释就是这个（AGENTS.md §12.8）。
+/// 以前只能按"Flutter 大概跑核显"猜（`VendorId == 0x8086` 那种启发式）；现在
+/// `FlutterDesktopPluginRegistrarGetGraphicsAdapter` 能直接问出引擎那块适配器，
+/// 于是"同适配器"从猜测变成可比对的前提，GPU 路才敢在默认配置下打开。
+///
+/// 通道层（`flutter_window.cpp`）在 platform thread 上问一次，之后只传值——
+/// 解码器本身**不依赖 Flutter API**（保持可离线自测，见 AGENTS.md §12.3）。
+struct EngineRenderingAdapter {
+  bool known = false;     // 是否真的问到了（问不到就永远不会走 GPU 路）
+  uint64_t luid = 0;      // LUID 打包成 64 位（低 32 位 + 高 32 位）
+  std::string name;       // 适配器名（只用于日志）
+};
+
 }  // namespace ws_scrcpy
 
 class ScrcpyVideoDecoder {
  public:
   ScrcpyVideoDecoder(flutter::TextureRegistrar* texture_registrar,
-                     ws_scrcpy::DecoderStartupTimings startup);
+                     ws_scrcpy::DecoderStartupTimings startup,
+                     ws_scrcpy::EngineRenderingAdapter engine_adapter);
   ~ScrcpyVideoDecoder();
 
   ScrcpyVideoDecoder(const ScrcpyVideoDecoder&) = delete;

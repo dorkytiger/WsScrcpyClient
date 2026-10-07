@@ -59,8 +59,11 @@ Android 端同样可用（MediaCodec 路线）。真机日志验证过 `已发�
 1. ★ **`MF_LOW_LATENCY` 是"全黑 + 时不时卡几秒"的根因与修法**（见 §12.8 末尾）——
    已本机自动投流 + 自己截屏确认：`已发布 22/23`、画面正常；
 2. §12.7 的"**禁止放大 + 16 宏块对齐**"——真机验证过（`已解码 67 / 已发布 67`）；
-3. **GPU 共享纹理路默认关闭**（双显卡跨适配器，详见 §12.8 第三次），
-   现在默认走 **CPU 像素缓冲路**；要看 GPU 路显式 `WS_SCRCPY_GPU=1`（可用 `WS_SCRCPY_GPU_ADAPTER` 选核显）；
+3. **GPU 共享纹理路：默认关闭（CPU 像素缓冲路）**。2026-10-08 做过一次"问引擎要渲染适配器、
+   按 LUID 对齐同适配器"的改造（`FlutterDesktopPluginRegistrarGetGraphicsAdapter`），
+   **同适配器确实成立了、引擎也一直在按 vsync 取帧（`引擎取帧延迟` 有数），但屏幕仍然全黑**
+   ——所以"跨适配器"不是（或不只是）根因，GPU 路维持"要显式要才建"（`WS_SCRCPY_GPU=1`；
+   `=auto` 走 LUID 判定）。原始日志与下一步嫌疑见 §12.8 的"2026-10-08"小节；
 4. **队列上限 60→4** + 两侧吞吐诊断计数已落地。
 
 **教训（最贵的两条）**：① **`已发布 N 帧` ≠ 画面上屏**——日志全绿也可能黑屏，
@@ -969,8 +972,9 @@ WS 视频帧 ──► StreamSessionService.videoFrames ──► PlayerViewMode
 ### 12.3 本机可跑的验证（四条自测 + 一条编译检查）
 
 - `tools\run_d3d11_present_test.cmd`：**GPU 呈现路**——NV12 重排的字节级断言 + 着色器数值与
-  CPU 参考实现逐像素比对 + **跨设备共享句柄**（模拟引擎/ANGLE 的 `OpenSharedResource`），
-  普通 + ASan 各一遍，**检查项 61 / 失败 0**（细节见 §12.8）。
+  CPU 参考实现逐像素比对 + **跨设备共享句柄**（模拟引擎/ANGLE 的 `OpenSharedResource`：
+  同适配器必须成功、跨适配器必须失败）+ **`kAuto` 选路的 3 条门禁**（见 §12.8 的 2026-10-08 小节），
+  普通 + ASan 各一遍，**检查项 68 / 失败 0**。
 - `tools\check_runner_compile.cmd`：`/W4 /WX /utf-8` 下把全部 runner 源文件编译一遍；
   受限沙箱里 `flutter build` 起不来（工具链子进程管道被拒）时，用它当编译门禁。
 - `tools\run_yuv_test.cmd`：YUV→RGBA 边界自测 + **输出缓冲容量**（普通 + ASan），
@@ -1159,8 +1163,9 @@ WS 帧 → MF H.264 解码器 MFT → NV12（系统内存，含跨距）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `WS_SCRCPY_GPU=0` | 开 | 完全回退 CPU 像素缓冲路 |
-| `WS_SCRCPY_GPU_SYNC=none` | `keyed` | 共享纹理不带 keyed mutex（排查"引擎取锁与我们不一致"） |
+| `WS_SCRCPY_GPU` | **关（CPU 路）** | 不设/`=0` = CPU 像素缓冲；`=auto` = 能证明"与引擎同一块适配器"（LUID 比对）时才建 GPU 路；`=1` = 强制建 GPU 路（跨适配器也可建） |
+| `WS_SCRCPY_GPU_ADAPTER` | 引擎那条 | 显式指定适配器（`0`/`1`… 或 `intel`/`amd`/`nvidia` 子串）；显式值**优先于**引擎匹配，只用于排障 |
+| `WS_SCRCPY_GPU_SYNC=none` | `keyed` | 共享纹理不带 keyed mutex（**GPU 路黑屏时的第一号嫌疑，见下**） |
 | `WS_SCRCPY_GPU_HANDLE=nth` | `legacy` | 改用 `IDXGIResource1::CreateSharedHandle`（NTHANDLE） |
 
 #### 本机验证（不需要真机与服务端）
@@ -1223,6 +1228,158 @@ COMMAND_DRAIN       ：首帧第 1 帧但之后不再产出（drain 后必须 fl
 - **`已发布` 涨但 `光栅回调` 不涨** = 卡在引擎侧（上传/合成）；两者都不涨 = 帧没到（服务端/网络）。
 - 离线工具（不需要设备与用户）：`tools\run_mft_replay_probe.cmd [抓包]`、`run_mft_negotiate_probe.cmd`、
   `run_d3d11_adapter_probe.cmd`、`run_stderr_redirect_test.cmd`、`run_d3d11_present_test.cmd`。
+
+
+#### 2026-10-08：GPU 呈现路改成"能证明同适配器才用"（默认启用）+ 呈现延迟计量
+
+**要解决的问题是"结构性差距"里剩下的那部分**（§12.8 开头的原因 ①/③）：CPU 像素缓冲路每帧
+要在解码线程做一次整帧 NV12→RGBA（本机 720p Debug 实测 4~5ms，见心跳的 `换算`），
+再在**光栅线程**把整帧 RGBA（720p 3.7MB）交给引擎 `glTexImage2D`；GPU 共享纹理路把这两件事
+都去掉（CPU 只做约 1.4MB 的 NV12 重排 + 上传，缩放/色彩在像素着色器里）。但这条路
+2026-10-01 真机第三次**全黑**，于是一直默认关闭。
+
+**根因（已在 §12.8 上文写死）**：传统 DXGI 共享句柄**不能跨适配器打开**
+（`tools\run_d3d11_adapter_probe.cmd`：同适配器 3/3 成功、跨适配器 0/6），
+而当时"引擎用哪块适配器"只能**猜**（旧代码的启发式：优先 `VendorId == 0x8086/0x1002` 的核显）。
+本机就是两块 GPU（`[0]NVIDIA GeForce RTX 5060 Laptop GPU`、`[1]Intel(R) UHD Graphics`），
+猜错就黑屏，而日志上"已发布 N 帧 / 光栅回调 N 次"一切正常（§12.8 教训①）。
+
+**这次的解药是一条现成的引擎 API**（本机 flutter_windows.dll 实测导出，`dumpbin /exports`）：
+
+```
+FlutterDesktopEngineGetGraphicsAdapter            (engine, IDXGIAdapter**)
+FlutterDesktopPluginRegistrarGetGraphicsAdapter   (registrar, IDXGIAdapter**)
+```
+
+于是"同适配器"从**猜测**变成**可比对的前提**：通道层在 `create` 时问一次引擎的渲染适配器
+（`flutter_window.cpp::QueryEngineRenderingAdapter` → `DXGI_ADAPTER_DESC.AdapterLuid`），
+把 LUID 传给呈现器（`PresenterOptions::have_engine_adapter / engine_adapter_luid`），
+呈现器**枚举适配器按 LUID 精确匹配**，建完设备后还会**用自己的设备 LUID 复核一次**。
+
+**规则（`PresenterOptions::Mode`，三态）**：
+
+| 模式 | 怎么开 | 行为 |
+|---|---|---|
+| `kForceOff`（**默认**） | 不设 / `WS_SCRCPY_GPU=0` | 完全不建 D3D11 设备，走 CPU 像素缓冲路 |
+| `kAuto` | `WS_SCRCPY_GPU=auto` | **只在能证明"与引擎同一块适配器"时才建 GPU 路**；证明不了就打印原因并回落 CPU 路 |
+| `kForceOn` | `WS_SCRCPY_GPU=1` | 照建（A/B 与排障用；跨适配器时**大概率全黑**，日志会打 WARNING） |
+
+**★ 第一次真机验收（2026-10-08 20:22，pid=13768）：同适配器成立、引擎也在正常取帧，但屏幕全黑**
+——也就是说**"跨适配器"不是（或不只是）根因**，我原来的判断被这次实测推翻了，原始记录如下
+（这是"默认关"的**唯一依据**，别再当成"已经能用"）：
+
+```
+引擎渲染适配器：NVIDIA GeForce RTX 5060 Laptop GPU（LUID 0xFE64）      ← 引擎自己在独显上（不是核显！）
+适配器列表：[0]NVIDIA…(LUID 0xFE64)，[1]Intel…(LUID 0xFA84)，[2]Microsoft Basic Render Driver(LUID 0xFDD0)；
+  本次选用 [0]（策略=引擎渲染适配器（LUID 匹配），引擎匹配=是）
+呈现路径：GPU 共享纹理（…），适配器=NVIDIA…，与引擎同适配器=是（共享句柄可被引擎打开的前提成立）
+心跳：…路径=GPU 共享纹理（本帧上传 1ms），光栅回调 28（本秒 +15），引擎取帧延迟 15ms（本秒 10 帧）…
+      ，已发布 22，丢弃 0，ProcessOutput 失败 0
+```
+
+**读法（三个事实）**：① 旧的"优先核显"启发式这台机器上**本来就是错的**——引擎其实在 NVIDIA 上，
+所以 2026-10-01 那次黑屏确实可能是跨适配器；② 这次 LUID 匹配把它修正了（两边都是 NVIDIA），
+`tools\run_d3d11_present_test.cmd` 也证明**同适配器下第二个设备能打开我们的句柄**；
+③ **但屏幕还是黑的**，而且引擎**一直在按 vsync 取我们的纹理**——这一段是本次新加的
+`引擎取帧延迟` 度量第一次给出证据，老日志里只有"取了几次"是看不出来的。
+
+**因此默认退回 CPU 路**（`kForceOff`），GPU 路保留为显式开关。**未确认的不变量**依旧成立：
+`已发布 N 帧` / `引擎匹配=是` / `光栅回调在涨` 都**不等于**画面上屏（§12.8 教训①）。
+
+**下一次要做的（按嫌疑排序，都在日志能自证）**：
+
+1. **keyed mutex 是第一号嫌疑**：`set WS_SCRCPY_GPU=1` + `set WS_SCRCPY_GPU_SYNC=none`
+   跑一次。ANGLE 的 `EGL_ANGLE_d3d_share_handle_client_buffer` 路径（字符串实锤：
+   `-Failed to open share handle, ` / `Failed to query ID3D11Texture2D object from share handle.` /
+   `Invalid texture parameters in share handle texture.`）对共享纹理的同步要求与我们默认的
+   `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` 不一定一致；
+2. **`GPU 首帧纹理自检` 这一行**（本次新增，GPU 路首帧只跑一次）：
+   `GPU 首帧纹理自检：非黑像素 x%，平均亮度 y/255（采样 …，物理 WxH）`
+   —— **非黑比例高 = 纹理里确实有画面**，问题在引擎侧消费/合成（去查 1 的同步、或引擎的
+   外部纹理实现）；**全黑 = 问题在我们这一侧**（上传/着色器/尺寸），不用去猜引擎；
+3. 想直接看**引擎自己**的报错（`embedder_external_texture_gl.cc` 的
+   `Could not create external texture->` / ANGLE 的 `ERR()`）：**`engine_stderr.log` 抓不到**
+   —— 已实测那个文件里只有我们 `DebugLog` 的输出（连 2026-10-01 那次 BGRA 失败的引擎报错
+   都不在里面）。要么用 `flutter run -d windows` 看控制台，要么用 DebugView 之类抓
+   `OutputDebugString`。**这一条是本次新确认的事实，别再指望 stderr 重定向。**
+
+**★ 收尾：默认（CPU 像素缓冲）路实测达标 —— 用户 2026-10-08 确认"很流畅、内网几乎没有延迟"**
+
+原始日志（pid=9768，最后一次投流连续 37 秒，1280x720）：
+
+```
+心跳：收到 1918，已喂入 1918，已发布 1917，丢弃 0，队列深度 0，帧间隔 16~43ms，
+      平均处理 6ms（解码 1~2ms + 换算 4ms），路径=CPU 像素缓冲，
+      光栅回调 1756（本秒 +46/+49/+42），引擎取帧延迟 3~10ms（本秒 42~48 帧），
+      队列等待 0ms，队列上限 4，ProcessOutput 失败 0
+```
+
+**≈50fps、队列等待 0ms、丢弃 0、引擎取帧延迟 3~10ms**（60Hz 一个 vsync 是 16.7ms，
+即引擎几乎在下一次 vsync 就把帧取走了）。对比 §12.8 开头那次"又卡又延迟"的记录
+（`帧间隔 31~161ms`、`平均处理 7ms`、`光栅回调 22~32/s`），这一段已经**不是瓶颈**。
+
+**这条数据同时回答了"GPU 路还值不值得修"**（本来是个悬而未决的问题）：
+GPU 路能省的是**每帧 4ms 的 CPU 换算 + 光栅线程那 3.7MB 上传**，而
+**引擎取帧延迟已经只有 3~10ms、队列等待 0** —— 也就是说延迟的大头不在呈现段，
+省这 4ms CPU 换不来可感知的延迟改善（还冒着全黑的风险）。
+**结论：GPU 路降级为"以后有空再说"的优化项，不再为它花时间**；
+真要动它，先按上面第 1、2 条把黑屏原因坐实（keyed mutex / 首帧纹理自检）。
+
+**新增/变更的日志锚点**（验收就看这几行，全部在 `scrcpy_decoder.log`）：
+
+```
+引擎渲染适配器：Intel(R) UHD Graphics（LUID 0xFA84）
+适配器列表：[0]NVIDIA …(LUID 0xFE64)，[1]Intel(R) UHD Graphics(LUID 0xFA84)，[2]Microsoft Basic Render Driver(LUID 0xFDD0)；
+  本次选用 [1]（策略=引擎渲染适配器（LUID 匹配），引擎匹配=是）
+D3D11 设备已创建：适配器=Intel(R) UHD Graphics（LUID 0xFA84），特性级别=45312，引擎匹配=是（引擎那块=Intel…）
+呈现路径：GPU 共享纹理（D3D11 → RGBA → DXGI 共享句柄），适配器=Intel…，与引擎同适配器=是（共享句柄可被引擎打开的前提成立）
+心跳：…，路径=GPU 共享纹理（本帧上传 Xms，平均 Yms），光栅回调 N（本秒 +M），
+      引擎取帧延迟 Zms（本秒 K 帧），队列等待 …
+```
+
+**新增的第二个度量：`引擎取帧延迟`（发布 → 引擎取走）**。
+`光栅回调` 只说明"引擎来取过几次"，**没有时间维度**；而 §12.8 的原因 ③（引擎 present 节奏）
+恰恰是唯一我们控制不了的一段。现在两条呈现路共用一份实现
+（`windows/runner/present_latency.h`：`MarkPublished()` 在解码线程、`MarkPickedUp()` 在光栅回调，
+**只有"这一帧是新发布的"才计一个样本**，空取不计），心跳里报本秒平均。
+判据：**它偏高（> 一个 vsync 的十几倍）说明瓶颈在引擎取帧节奏**，与"我们解码快不快"无关。
+
+**本机 CPU 路基线（2026-10-07 20:01 那次真机运行，1280x720，用于和 GPU 路对比）**：
+
+```
+心跳：收到 283，已喂入 283，已发布 282，丢弃 0，队列深度 0，帧间隔 31~161ms，
+      平均处理 7ms（解码 2ms + 换算 5ms），路径=CPU 像素缓冲，光栅回调 222（本秒 +22），队列等待 1~5ms
+```
+
+也就是说：**这一段要省掉的是"换算 5ms + 光栅线程那 3.7MB 上传"**；换成 GPU 路后，
+`换算` 应当恒为 0（改看 `本帧上传`），`平均处理` 应当下降，`引擎取帧延迟` 应当可读且稳定。
+
+**离线证据（不需要设备/服务端/用户）**：
+
+- `tools\run_d3d11_present_test.cmd`：**检查项 68 / 失败 0**（普通 + ASan 各一遍；改前是 61 项），
+  新增的三条正是这次的不变量门禁：
+  ① `kAuto` + 不知道引擎适配器 → **必须拒绝**建 GPU 路；
+  ② `kAuto` + 引擎 LUID 与本设备一致 → 建得起来且 `引擎匹配=是`；
+  ③ `kAuto` + 引擎在另一块适配器 → **必须拒绝**。
+  同时把"模拟引擎"的那一步**改对了**：原来用 `D3D11CreateDevice(nullptr)` 建第二个设备
+  （拿的是系统默认适配器 = 本机 NVIDIA），于是那条"另一设备能打开共享句柄"的断言实际在测
+  **跨适配器**，本机必然红；现在改成**按 LUID 找回同一块**（必须成功）**再拿另一块试**（必须失败），
+  与真实引擎行为一致，也正好把"kAuto 为什么必须拒绝"变成了可执行的证据。
+- `tools\check_runner_compile.cmd`：`COMPILE_CHECK: PASS`（`/W4 /WX /utf-8`）。
+  **顺带修掉一个与本次无关的坑**：这个脚本在盘上是 **LF 换行**，而 `.gitattributes` 明确要求
+  `*.cmd` 用 CRLF —— cmd.exe 解析含 `for /f` + 括号块的行时会崩
+  （报一堆 `'k' is not recognized` 之类的碎片），脚本根本跑不起来。已按 `.gitattributes` 转成 CRLF。
+
+**★ 还没做的那一步（按纪律必须写明）**：**本机肉眼确认上屏**。
+`已发布 N 帧`、`引擎匹配=是` 都**不等于**画面上屏（§12.8 教训①就是这么来的）。
+复验步骤与判据：
+
+1. `flutter build windows --debug`，然后
+   `set WS_SCRCPY_AUTOSTART=1` + 直接跑 exe（或 `flutter run -d windows`）；
+2. **看窗口里有没有画面**（不是看日志）；
+3. 日志里确认这三行同时成立：`引擎渲染适配器：…`、`引擎匹配=是`、`呈现路径：GPU 共享纹理`；
+4. 若**全黑**：立刻 `set WS_SCRCPY_GPU=0` 回 CPU 路（那条一直是可靠的），
+   并把日志发回来 —— 说明 LUID 匹配还不足以让引擎打开句柄，那就退回"默认关"并把这条写进文档。
 
 
 #### 遗留与下一步

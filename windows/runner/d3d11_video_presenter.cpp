@@ -77,18 +77,21 @@ std::string ToLower(std::string text) {
   return text;
 }
 
-bool EnvFlag(const char* name, bool fallback) {
+// 三态解析。**默认是 kForceOff（CPU 路）**：GPU 路在 2026-10-08 那次"同适配器 + 引擎正常取帧
+// 也照样全黑"之后，必须先在屏幕上见过画面才敢当默认（`已发布 N 帧` ≠ 上屏，§12.8 教训①）。
+//   WS_SCRCPY_GPU 未设 / =0  → kForceOff（默认，CPU 像素缓冲）
+//   WS_SCRCPY_GPU=auto       → kAuto（只在能证明与引擎同适配器时才建 GPU 路）
+//   WS_SCRCPY_GPU=1          → kForceOn（强制；跨适配器也可建）
+// 不认识的值一律按 kForceOff（稳妥优先）。
+PresenterOptions::Mode ModeFromEnvironment(const char* name) {
   const std::string value = EnvString(name);
-  if (value.empty()) {
-    return fallback;
-  }
-  if (value == "0" || value == "off" || value == "false" || value == "no") {
-    return false;
+  if (value == "auto") {
+    return PresenterOptions::Mode::kAuto;
   }
   if (value == "1" || value == "on" || value == "true" || value == "yes") {
-    return true;
+    return PresenterOptions::Mode::kForceOn;
   }
-  return fallback;
+  return PresenterOptions::Mode::kForceOff;
 }
 
 std::string Utf8FromWide(const wchar_t* text) {
@@ -124,12 +127,14 @@ std::string HandleText(uint64_t handle) {
 
 PresenterOptions PresenterOptions::FromEnvironment() {
   PresenterOptions options;
-  // **默认关闭**（2026-10-01 真机修正）：GPU 共享纹理路在真机上**画面全黑**——
-  // 解码/发布都正常（`已解码 67 / 已发布 67`），引擎也照常回调取描述符（`光栅回调 154`），
-  // 但屏幕上什么都没有，引擎 stderr 里是 `Could not create external texture`。
-  // 结论：**"已发布"不等于"上屏"**，这条路必须在真机上肉眼确认过才算能用。
-  // 现在默认走已验证能出画面的 CPU 像素缓冲路；要看 GPU 路请显式 `set WS_SCRCPY_GPU=1`。
-  options.enabled = EnvFlag("WS_SCRCPY_GPU", false);
+  // **默认 kForceOff（CPU 路）**：GPU 共享纹理路有一次"同适配器、引擎也在正常取帧、
+  // 但屏幕全黑"的记录（2026-10-08，证据见 AGENTS.md §12.8 的 2026-10-08 小节），
+  // 所以它退回到"要显式要才建"的地位：
+  //   WS_SCRCPY_GPU=0/未设 → CPU 像素缓冲（默认，已知可靠）
+  //   WS_SCRCPY_GPU=auto    → 能证明"与引擎同一块适配器"时才建（LUID 比对）
+  //   WS_SCRCPY_GPU=1       → 强制建（排障/A-B 用）
+  // 这样"屏幕上有没有画面"这件事不会因为一次没验过的优化而回退。
+  options.mode = ModeFromEnvironment("WS_SCRCPY_GPU");
   // 默认按 ANGLE 共享句柄路径的约定用 keyed mutex；WS_SCRCPY_GPU_SYNC=none 关掉它。
   const std::string sync = EnvString("WS_SCRCPY_GPU_SYNC");
   options.keyed_mutex = sync != "none" && sync != "off" && sync != "false" &&
@@ -137,7 +142,7 @@ PresenterOptions PresenterOptions::FromEnvironment() {
   const std::string handle = EnvString("WS_SCRCPY_GPU_HANDLE");
   options.nth_handle = handle == "nth" || handle == "nthandle" ||
                        handle == "create";
-  // 选适配器（双显卡笔记本上决定"能不能上屏"）：默认 auto = 优先核显。
+  // 选适配器（双显卡笔记本上决定"能不能上屏"）：默认 auto = 先按引擎适配器匹配。
   const std::string adapter = EnvString("WS_SCRCPY_GPU_ADAPTER");
   options.adapter_hint = adapter.empty() ? "auto" : adapter;
   return options;
@@ -163,12 +168,18 @@ class D3d11VideoPresenter::Impl {
   uint32_t visible_width() const { return snapshot_copy().visible_w; }
   uint32_t visible_height() const { return snapshot_copy().visible_h; }
   std::string device_name() const { return device_name_; }
+  bool engine_adapter_matched() const { return engine_matched_; }
+  std::string engine_adapter_name() const { return engine_adapter_name_; }
+  uint64_t device_adapter_luid() const { return device_luid_; }
+  uint64_t present_latency_samples() const { return latency_.samples(); }
+  uint64_t present_latency_sum_us() const { return latency_.sum_us(); }
   std::string LastError() const;
   bool keyed_mutex_enabled() const { return options_.keyed_mutex; }
   bool nth_handle_enabled() const { return options_.nth_handle; }
   uint64_t shared_handle_value() const;
   uint64_t descriptor_callbacks() const { return descriptor_callbacks_.load(); }
   bool ReadbackForTest(std::vector<uint8_t>* out);
+  std::string FirstFrameContentReport();
 
  private:
   // 给光栅线程读的一份快照：只有句柄与尺寸，不暴露任何 D3D11 对象。
@@ -226,6 +237,13 @@ class D3d11VideoPresenter::Impl {
   uint32_t visible_width_ = 0;
   uint32_t visible_height_ = 0;
   std::string device_name_;
+  // 我们实际用的适配器 LUID 与"是否就是引擎那块"：kAuto 的决策依据，也是黑屏时
+  // 第一个要看的两个字段（见 PresenterOptions::Mode 的注释）。
+  uint64_t device_luid_ = 0;
+  bool engine_matched_ = false;
+  std::string engine_adapter_name_;
+  // "发布 → 引擎取走"的延迟（与 CPU 像素缓冲路共用同一份实现，见 present_latency.h）。
+  PresentLatencyMeter latency_;
   std::string last_error_;
 };
 
@@ -252,12 +270,24 @@ bool D3d11VideoPresenter::Impl::Create(uint32_t width, uint32_t height,
   ready_.store(true);
   DebugLog(std::string(kTag) + "初始化完成：适配器=" +
            (device_name_.empty() ? std::string("<未知>") : device_name_) +
-           "，物理尺寸=" + std::to_string(physical_width_) + "x" +
+           "（LUID " + HandleText(device_luid_) + "，引擎匹配=" +
+           (engine_matched_ ? "是" : "否") + "），物理尺寸=" +
+           std::to_string(physical_width_) + "x" +
            std::to_string(physical_height_) + "，可见尺寸=" +
            std::to_string(visible_width_) + "x" +
            std::to_string(visible_height_) + "，共享句柄=" +
            HandleText(shared_handle_value()) + "，同步=" + (options_.keyed_mutex ? "keyed-mutex(key 0)" : "无") +
            "，句柄类型=" + (options_.nth_handle ? "NTHANDLE" : "传统 GetSharedHandle"));
+  // 这条是"GPU 路到底走没走通"的**验收锚点**（与 AGENTS.md §12.8 的判据对齐）：
+  //   - 引擎匹配=是 + 之后心跳里 已发布 ≈ 光栅回调 → 这才算"同适配器共享纹理可用"；
+  //   - 匹配=否（只有 WS_SCRCPY_GPU=1 才会走到）→ 真机大概率全黑，别急着当成功。
+  if (!engine_matched_) {
+    DebugLog(std::string(kTag) +
+             "WARNING 本次是**强制** GPU 路，但两边不在同一块适配器上："
+             "传统 DXGI 共享句柄不能跨适配器打开（实测同适配器 3/3、跨适配器 0/6），"
+             "引擎侧多半拿不到纹理 → 画面可能全黑（AGENTS §12.8 真机第三次）。"
+             "要回稳妥路线请去掉 WS_SCRCPY_GPU=1。");
+  }
   return true;
 }
 
@@ -270,8 +300,17 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
   D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_10_0;
 
   // ---- 选适配器（双显卡笔记本上这一步决定"能不能上屏"，见头文件注释）----
+  //
+  // 优先级（2026-10-08 起）：
+  //   ① 显式指定（WS_SCRCPY_GPU_ADAPTER=0/1/intel/…）——A/B 与排障用，永远最高优先；
+  //   ② **与引擎渲染适配器同一块**（按 LUID 比对）——kAuto 唯一接受的选择；
+  //   ③ 核显启发式（旧行为，只在 kForceOn 且 ①② 都没命中时用）；
+  //   ④ 第 0 块。
+  // ②是这次改动的核心：传统共享句柄只在同适配器可打开，而"引擎在哪块"以前只能猜。
   ComPtr<IDXGIAdapter1> chosen_adapter;
   std::string adapter_list;
+  int chosen = -1;
+  std::string strategy;
   {
     ComPtr<IDXGIFactory1> factory;
     if (SUCCEEDED(::CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
@@ -290,13 +329,16 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
             adapter_list += "，";
           }
           adapter_list += "[" + std::to_string(index) + "]" +
-                          Utf8FromWide(description.Description);
+                          Utf8FromWide(description.Description) + "(LUID " +
+                          HandleText(PresenterOptions::PackLuid(
+                              description.AdapterLuid.LowPart,
+                              description.AdapterLuid.HighPart)) +
+                          ")";
         }
         adapters.push_back(adapter);
       }
       if (!adapters.empty()) {
         const std::string hint = ToLower(options_.adapter_hint);
-        int chosen = -1;
         if (hint != "auto" && !hint.empty()) {
           // 数字 = 索引；否则按名字子串（intel / amd / nvidia）。
           const bool numeric = hint.find_first_not_of("0123456789") ==
@@ -305,6 +347,7 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
             const int index = std::atoi(hint.c_str());
             if (index >= 0 && index < static_cast<int>(adapters.size())) {
               chosen = index;
+              strategy = "显式索引(" + options_.adapter_hint + ")";
             }
           } else {
             for (size_t index = 0; index < adapters.size(); ++index) {
@@ -313,36 +356,73 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
                   ToLower(Utf8FromWide(description.Description))
                           .find(hint) != std::string::npos) {
                 chosen = static_cast<int>(index);
+                strategy = "显式名字(" + options_.adapter_hint + ")";
                 break;
               }
             }
           }
           if (chosen < 0) {
             DebugLog(std::string(kTag) + "WS_SCRCPY_GPU_ADAPTER=" +
-                     options_.adapter_hint + " 没匹配到适配器，回落到 auto");
+                     options_.adapter_hint + " 没匹配到适配器，回落到自动选择");
           }
         }
-        if (chosen < 0) {
-          // auto：优先核显（Intel 0x8086 / AMD 0x1002、0x1022）。理由：混合显卡笔记本上
-          // Flutter/ANGLE 默认跑核显，而 D3D11CreateDevice(nullptr) 常常给独显 —— 两边错开就黑屏。
+        // ② 引擎适配器（按 LUID 精确比对，不按名字/厂商猜）。
+        if (chosen < 0 && options_.have_engine_adapter) {
+          for (size_t index = 0; index < adapters.size(); ++index) {
+            DXGI_ADAPTER_DESC1 description = {};
+            if (FAILED(adapters[index]->GetDesc1(&description))) {
+              continue;
+            }
+            const uint64_t luid =
+                PresenterOptions::PackLuid(description.AdapterLuid.LowPart,
+                                           description.AdapterLuid.HighPart);
+            if (luid == options_.engine_adapter_luid) {
+              chosen = static_cast<int>(index);
+              engine_matched_ = true;
+              engine_adapter_name_ = Utf8FromWide(description.Description);
+              strategy = "引擎渲染适配器（LUID 匹配）";
+              break;
+            }
+          }
+        }
+        // kAuto：证明不了"同适配器"就不建 GPU 路——真机第三次的黑屏就是跨适配器导致的，
+        // 而"已发布 N 帧"在那次完全正常，日志上根本看不出问题（AGENTS §12.8 的教训①）。
+        if (options_.mode == PresenterOptions::Mode::kAuto && !engine_matched_) {
+          *error =
+              std::string("auto 模式下无法证明与引擎同一块适配器") +
+              (options_.have_engine_adapter ? "（引擎 LUID " +
+                                                  HandleText(options_.engine_adapter_luid) +
+                                                  " 不在列表里）"
+                                            : "（没拿到引擎的渲染适配器）") +
+              "，按默认策略回落 CPU 像素缓冲路；要强制用 GPU 路设 WS_SCRCPY_GPU=1";
+          DebugLog(std::string(kTag) + "适配器列表：" +
+                   (adapter_list.empty() ? std::string("<空>") : adapter_list) +
+                   "；" + *error);
+          return false;
+        }
+        if (chosen < 0 && options_.mode == PresenterOptions::Mode::kForceOn) {
+          // ③ 核显启发式（旧行为，仅强制模式下的兜底）：混合显卡笔记本上 ANGLE 常常在核显，
+          // 而 D3D11CreateDevice(nullptr) 经常给独显 —— 两边错开就是黑屏。
           for (size_t index = 0; index < adapters.size(); ++index) {
             DXGI_ADAPTER_DESC1 description = {};
             if (SUCCEEDED(adapters[index]->GetDesc1(&description)) &&
                 (description.VendorId == 0x8086 || description.VendorId == 0x1002 ||
                  description.VendorId == 0x1022)) {
               chosen = static_cast<int>(index);
+              strategy = "核显启发式（强制模式兜底）";
               break;
             }
           }
         }
         if (chosen < 0) {
-          chosen = 0;  // 没有核显（或枚举信息不全）就用第 0 块
+          chosen = 0;  // ④ 没有核显（或枚举信息不全）就用第 0 块
+          strategy = "第 0 块（兜底）";
         }
         chosen_adapter = adapters[static_cast<size_t>(chosen)];
         DebugLog(std::string(kTag) + "适配器列表：" +
                  (adapter_list.empty() ? std::string("<空>") : adapter_list) +
-                 "；本次选用 [" + std::to_string(chosen) + "]（策略=" +
-                 options_.adapter_hint + "）");
+                 "；本次选用 [" + std::to_string(chosen) + "]（策略=" + strategy +
+                 "，引擎匹配=" + (engine_matched_ ? "是" : "否") + "）");
       }
     }
   }
@@ -373,6 +453,10 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
 
   // 适配器名只用于日志：多显卡机器上能一眼看出用的是哪块 GPU
   // （共享句柄要求两侧在同一适配器上，出问题时这条日志是第一个要看的）。
+  //
+  // **这里是"引擎匹配"的最终复核**：上面第 ② 步是按 LUID 选的，但显式指定 / 兜底 /
+  // 系统回落都可能让我们最后拿到另一块——所以以**设备自己的 LUID** 为准重新判一次。
+  // kAuto 下复核不通过就整个放弃 GPU 路（宁可 CPU 忙，也不要一块黑屏）。
   ComPtr<IDXGIDevice> dxgi_device;
   if (SUCCEEDED(device_.As(&dxgi_device))) {
     ComPtr<IDXGIAdapter> adapter;
@@ -380,12 +464,32 @@ bool D3d11VideoPresenter::Impl::CreateDevice(std::string* error) {
       DXGI_ADAPTER_DESC description = {};
       if (SUCCEEDED(adapter->GetDesc(&description))) {
         device_name_ = Utf8FromWide(description.Description);
+        device_luid_ = PresenterOptions::PackLuid(description.AdapterLuid.LowPart,
+                                                  description.AdapterLuid.HighPart);
       }
     }
   }
+  if (options_.have_engine_adapter) {
+    engine_matched_ = device_luid_ == options_.engine_adapter_luid;
+  } else {
+    engine_matched_ = false;
+  }
+  if (options_.mode == PresenterOptions::Mode::kAuto && !engine_matched_) {
+    ReleaseDeviceObjects();
+    *error = "auto 模式下建出来的设备不在引擎那块适配器上（本设备 LUID " +
+             HandleText(device_luid_) + "，引擎 LUID " +
+             HandleText(options_.engine_adapter_luid) +
+             "），按默认策略回落 CPU 像素缓冲路；要强制用 GPU 路设 WS_SCRCPY_GPU=1";
+    return false;
+  }
   DebugLog(std::string(kTag) + "D3D11 设备已创建：适配器=" +
            (device_name_.empty() ? std::string("<未知>") : device_name_) +
-           "，特性级别=" + std::to_string(static_cast<int>(obtained)));
+           "（LUID " + HandleText(device_luid_) + "），特性级别=" +
+           std::to_string(static_cast<int>(obtained)) + "，引擎匹配=" +
+           (engine_matched_ ? "是" : "否") +
+           (engine_adapter_name_.empty()
+                ? std::string()
+                : "（引擎那块=" + engine_adapter_name_ + "）"));
   return true;
 }
 
@@ -652,6 +756,9 @@ bool D3d11VideoPresenter::Impl::PublishNv12(const Nv12Frame& frame) {
   if (acquired) {
     keyed_mutex_->ReleaseSync(0);
   }
+  // 一帧真的写进共享纹理了：记一次"发布时刻"，等引擎来取时算延迟
+  // （口径与 CPU 像素缓冲路共用，见 present_latency.h）。
+  latency_.MarkPublished();
   return true;
 }
 
@@ -713,6 +820,10 @@ void D3d11VideoPresenter::Impl::ReleaseDeviceObjects() {
   physical_height_ = 0;
   visible_width_ = 0;
   visible_height_ = 0;
+  device_luid_ = 0;
+  engine_matched_ = false;
+  engine_adapter_name_.clear();
+  latency_.Reset();
 }
 
 const FlutterDesktopGpuSurfaceDescriptor*
@@ -726,6 +837,8 @@ D3d11VideoPresenter::Impl::ObtainDescriptor() {
   if (!snapshot.ready || snapshot.handle == nullptr) {
     return nullptr;  // 引擎会跳过这一帧（回调返回空是允许的）
   }
+  // 引擎把这一帧取走了：记一次延迟样本（没有新帧的空取不计，见 present_latency.h）。
+  latency_.MarkPickedUp();
   // 每次回调一份描述符：引擎打开句柄后会调 release_callback，我们在那里回收。
   struct DescriptorHolder {
     FlutterDesktopGpuSurfaceDescriptor descriptor = {};
@@ -745,8 +858,7 @@ D3d11VideoPresenter::Impl::ObtainDescriptor() {
   return &holder->descriptor;
 }
 
-bool D3d11VideoPresenter::Impl::ReadbackForTest(std::vector<uint8_t>* out) {
-  if (out == nullptr) {
+bool D3d11VideoPresenter::Impl::ReadbackForTest(std::vector<uint8_t>* out) {  if (out == nullptr) {
     return false;
   }
   std::lock_guard<std::mutex> lock(render_mutex_);
@@ -792,6 +904,46 @@ bool D3d11VideoPresenter::Impl::ReadbackForTest(std::vector<uint8_t>* out) {
   }
   context_->Unmap(staging_texture_.Get(), 0);
   return true;
+}
+
+std::string D3d11VideoPresenter::Impl::FirstFrameContentReport() {
+  std::vector<uint8_t> pixels;
+  if (!ReadbackForTest(&pixels)) {
+    return "回读失败（拿不到 staging 纹理 / keyed mutex 超时 / 呈现器未就绪）";
+  }
+  const size_t row_bytes = static_cast<size_t>(physical_width_) * 4;
+  if (row_bytes == 0 || pixels.size() < row_bytes * physical_height_) {
+    return "回读缓冲大小不符（物理 " + std::to_string(physical_width_) + "x" +
+           std::to_string(physical_height_) + "，实际 " +
+           std::to_string(pixels.size()) + " 字节）";
+  }
+  // 采样：每 16 行取每 16 个像素一个，够判"有没有画面"，也不拖慢首帧。
+  uint64_t samples = 0;
+  uint64_t non_black = 0;   // 亮度 > 8 的像素
+  uint64_t luma_sum = 0;
+  for (uint32_t row = 0; row < physical_height_; row += 16) {
+    const uint8_t* line = pixels.data() + static_cast<size_t>(row) * row_bytes;
+    for (uint32_t column = 0; column < physical_width_; column += 16) {
+      const uint8_t* pixel = line + static_cast<size_t>(column) * 4;
+      const uint32_t luma = (static_cast<uint32_t>(pixel[0]) + pixel[1] + pixel[2]) / 3;
+      ++samples;
+      luma_sum += luma;
+      if (luma > 8) {
+        ++non_black;
+      }
+    }
+  }
+  if (samples == 0) {
+    return "采样数为 0（尺寸异常）";
+  }
+  char text[160] = {};
+  std::snprintf(text, sizeof(text),
+                "非黑像素 %.1f%%，平均亮度 %llu/255（采样 %llu 点，物理 %ux%u）",
+                static_cast<double>(non_black) * 100.0 / static_cast<double>(samples),
+                static_cast<unsigned long long>(luma_sum / samples),
+                static_cast<unsigned long long>(samples), physical_width_,
+                physical_height_);
+  return text;
 }
 
 void D3d11VideoPresenter::Impl::SetError(const std::string& message) {
@@ -853,6 +1005,26 @@ std::string D3d11VideoPresenter::device_name() const {
   return impl_->device_name();
 }
 
+bool D3d11VideoPresenter::engine_adapter_matched() const {
+  return impl_->engine_adapter_matched();
+}
+
+std::string D3d11VideoPresenter::engine_adapter_name() const {
+  return impl_->engine_adapter_name();
+}
+
+uint64_t D3d11VideoPresenter::device_adapter_luid() const {
+  return impl_->device_adapter_luid();
+}
+
+uint64_t D3d11VideoPresenter::present_latency_samples() const {
+  return impl_->present_latency_samples();
+}
+
+uint64_t D3d11VideoPresenter::present_latency_sum_us() const {
+  return impl_->present_latency_sum_us();
+}
+
 std::string D3d11VideoPresenter::LastError() const { return impl_->LastError(); }
 
 bool D3d11VideoPresenter::keyed_mutex_enabled() const {
@@ -892,6 +1064,10 @@ FlutterDesktopGpuSurfaceTextureConfig D3d11VideoPresenter::Config() {
 
 bool D3d11VideoPresenter::ReadbackForTest(std::vector<uint8_t>* out) {
   return impl_->ReadbackForTest(out);
+}
+
+std::string D3d11VideoPresenter::FirstFrameContentReport() {
+  return impl_->FirstFrameContentReport();
 }
 
 bool D3d11VideoPresenter::PackNv12(const Nv12Frame& frame,
