@@ -81,17 +81,27 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 环境诊断（排查挂载用；失败不拦）
-        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
-        continue-on-error: true
+      - name: 定位宿主机资源目录（挂载点在哪个路径上）
+        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
+        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
+        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
+        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
+        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
         run: |
-          echo "CI_HOST_DIR=$CI_HOST_DIR"
-          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
-          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
-          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
-          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
-          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
-          echo "== hostname ==" ; hostname
+          FOUND=""
+          for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
+            if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
+          done
+          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          if [ -n "$FOUND" ]; then
+            echo "✓ 命中宿主机目录：$FOUND"
+            echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
+          else
+            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
+            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
+            echo "== mountinfo 相关行 =="
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          fi
 
       - name: 基础工具（镜像里未必带 xz/zip/unzip）
         run: |
@@ -111,9 +121,10 @@ jobs:
           else
             echo "✗ 挂载里没有 flutter —— 会回退到下载（检查 dind 的 volume 与 container.options）"
           fi
-          # ★ 必须先判断 $CI_HOST_DIR **本来就存在**（= 挂载生效）：只 mkdir 的话，
-          #   没挂载时容器里也能凭空建出 /opt/dev（root 可写），于是会误报"缓存走挂载目录"。
-          if [ -d "$CI_HOST_DIR" ] && mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
+          # 只有前面"定位宿主机资源目录"那步真找到了（= 挂载生效）才用挂载目录做缓存；
+          # 否则 Gradle/pub 缓存在容器内（下次重下），但至少不会误报。
+          if [ -x "$CI_HOST_DIR/flutter/bin/flutter" ] \
+             && mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
             echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
             echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
             echo "缓存走挂载目录：$CI_HOST_DIR"
@@ -178,17 +189,27 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 环境诊断（排查挂载用；失败不拦）
-        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
-        continue-on-error: true
+      - name: 定位宿主机资源目录（挂载点在哪个路径上）
+        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
+        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
+        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
+        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
+        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
         run: |
-          echo "CI_HOST_DIR=$CI_HOST_DIR"
-          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
-          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
-          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
-          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
-          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
-          echo "== hostname ==" ; hostname
+          FOUND=""
+          for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
+            if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
+          done
+          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          if [ -n "$FOUND" ]; then
+            echo "✓ 命中宿主机目录：$FOUND"
+            echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
+          else
+            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
+            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
+            echo "== mountinfo 相关行 =="
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          fi
 
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
@@ -403,17 +424,27 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
-      - name: 环境诊断（排查挂载用；失败不拦）
-        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
-        continue-on-error: true
+      - name: 定位宿主机资源目录（挂载点在哪个路径上）
+        # 为什么要扫多个候选：**job 容器由哪个 daemon 创建决定了源路径怎么写** ——
+        #   ① runner 走 dind（tcp://docker-in-docker）→ 源路径是 dind 内的 /host-dev；
+        #   ② runner 直接连宿主 daemon → 源路径是宿主的 /home/warren/dev。
+        # 猜错的那个会被 docker **凭空建成空目录**并挂进来（现象就是"挂载没生效、还在下载"）。
+        # 所以 runner 侧用 container.options 同时挂两个点，这里扫一遍、谁有东西用谁。
         run: |
-          echo "CI_HOST_DIR=$CI_HOST_DIR"
-          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
-          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
-          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
-          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
-          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
-          echo "== hostname ==" ; hostname
+          FOUND=""
+          for candidate in /opt/dev /opt/dev2 "$CI_HOST_DIR"; do
+            if [ -x "$candidate/flutter/bin/flutter" ]; then FOUND="$candidate"; break; fi
+          done
+          echo "== ls /opt ==" ; ls -la /opt 2>&1 | head -10
+          if [ -n "$FOUND" ]; then
+            echo "✓ 命中宿主机目录：$FOUND"
+            echo "CI_HOST_DIR=$FOUND" >> "$GITHUB_ENV"
+          else
+            echo "✗ 两个挂载点都没有 flutter —— 退回下载（runner 侧请确认下面两行都在）:"
+            echo '  options: "--volume /host-dev:/opt/dev --volume /home/warren/dev:/opt/dev2"'
+            echo "== mountinfo 相关行 =="
+            grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          fi
 
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
