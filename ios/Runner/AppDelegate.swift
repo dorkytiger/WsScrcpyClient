@@ -21,6 +21,10 @@ import UIKit
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
+    // 原生视频层（见 docs/native-video-surface-darwin.md）：把平台视图工厂注册给隐式引擎。
+    engineBridge.applicationRegistrar.register(
+      ScrcpyVideoSurfaceFactory(), withId: ScrcpyVideoSurfaceFactory.viewType)
+
     // 本项目的 iOS 是 **Scene 生命周期 + 隐式引擎**（Info.plist 的 UIApplicationSceneManifest
     // + SceneDelegate），拿不到"在 didFinishLaunching 里取 window.rootViewController"那种
     // 常见示例里的 FlutterViewController。引擎只在这里暴露出来，所以通道就在这里注册。

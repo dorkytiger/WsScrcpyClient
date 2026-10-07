@@ -25,6 +25,11 @@ class MainFlutterWindow: NSWindow {
     // 拿注册表的路径与 iOS 不同：macOS 走 `FlutterPluginRegistrar`
     // （`messenger` / `textures` 是**属性**，iOS 上是方法）。
     // 兜底用引擎本身——`FlutterEngine` 也实现了 `FlutterTextureRegistry`。
+    // 原生视频层（见 docs/native-video-surface-darwin.md）：视图工厂与视频通道同一个注册表。
+    flutterViewController
+      .registrar(forPlugin: "WsScrcpyVideoSurface")
+      .register(ScrcpyVideoSurfaceFactory(), withId: ScrcpyVideoSurfaceFactory.viewType)
+
     let registrar = flutterViewController.registrar(forPlugin: "WsScrcpyVideo")
     videoChannel = ScrcpyVideoChannelHandler(
       messenger: registrar.messenger,

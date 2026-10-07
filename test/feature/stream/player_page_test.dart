@@ -20,6 +20,7 @@ import 'package:ws_scrcpy_client/feature/stream/presentation/view/player_page.da
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
 
 import '../../core/stream/stream_fixtures.dart';
+import 'package:ws_scrcpy_client/feature/stream/presentation/view/native_video_surface.dart';
 
 /// 原生解码通道名（与 MainActivity.kt 的约定一致）。
 const MethodChannel _videoChannel = MethodChannel('ws_scrcpy/video');
@@ -118,6 +119,9 @@ class _RecordingVideoDecoder extends _FakeVideoDecoder {
 }
 
 void main() {
+  // 这些用例断言的是 FlutterTexture 路径的几何；原生视频层另有真机截图验收。
+  setUpAll(() => NativeVideoSurface.debugForceTexture = true);
+
   final target = StreamTarget(
     serverUri: Uri.parse('https://android.dorkytiger.top/'),
     udid: 'redroid:5555',

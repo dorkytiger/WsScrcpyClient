@@ -19,6 +19,7 @@ import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.da
 import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/view/web_video_surface.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
+import 'package:ws_scrcpy_client/feature/stream/presentation/view/native_video_surface.dart';
 
 /// 投流页。
 ///
@@ -421,7 +422,9 @@ class _VideoStage extends StatelessWidget {
                   child: SizedBox(
                     width: (size?.width ?? 1280).toDouble(),
                     height: (size?.height ?? 720).toDouble(),
-                    child: Texture(textureId: textureId),
+                    child: NativeVideoSurface.isEnabled
+                        ? const NativeVideoSurface()
+                        : Texture(textureId: textureId),
                   ),
                 ),
               ),
