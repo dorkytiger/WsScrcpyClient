@@ -123,6 +123,40 @@ $ curl -s https://data.forgejo.org/v2/oci/node/tags/list | head -c 120
 也就是说 `oci/ubuntu:24.04` **不是 tag 写错，是那个路径从来没有过**，
 而 `oci/node`、`oci/python`、`oci/golang`、`oci/alpine`、`oci/debian` 都有。
 
+#### ★ 另一个镜像坑（2026-10-07 实测）：镜像里**只有 `actions/*`**，第三方 action 一律 404
+
+现象（job 已经能起来，但取 action 时挂）：
+
+```
+☁️  git clone 'https://data.forgejo.org/subosito/flutter-action' # ref=v2
+⚙️ [runner]: unable to probe object format ... remote: Not found.
+   fatal: repository 'https://data.forgejo.org/subosito/flutter-action/' not found
+```
+
+runner 的 `DEFAULT_ACTIONS_URL` 默认指向 **Forgejo 自己的 action 镜像 `data.forgejo.org`**，
+而那个镜像只镜像官方的 `actions/*`。探法（200 = 有、302 = 没有）：
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  'https://data.forgejo.org/subosito/flutter-action/info/refs?service=git-upload-pack'
+```
+
+实测：`actions/checkout` / `actions/setup-java` / `actions/upload-artifact` / `actions/cache` = **200**；
+`subosito/flutter-action` / `android-actions/setup-android` / `softprops/action-gh-release` = **302（没有）**。
+
+**修法（工作流侧，不动服务器）**：第三方 action 写**全 URL**，官方 `actions/*` 继续走镜像。
+
+```yaml
+      - uses: actions/checkout@v4                              # 镜像里有 ✓
+      - uses: https://github.com/subosito/flutter-action@v2     # 必须全 URL
+      - uses: https://github.com/android-actions/setup-android@v3
+```
+
+> 如果那台 runner **连 github.com 也不通**，两条退路：
+> ① 在 runner 的 `config.yml` 里把 `[actions] DEFAULT_ACTIONS_URL` 指到一个可达的镜像；
+> ② 干脆不用第三方 action —— Flutter 用 `curl` 下 tar.xz + `tar -xJf` 自己装
+> （还能顺手换国内镜像绕开 `storage.googleapis.com`），Android SDK 同理下 cmdline-tools。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**
