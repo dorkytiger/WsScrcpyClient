@@ -231,6 +231,15 @@ jobs:
           BASE="https://mirrors.cloud.tencent.com/AndroidSDK"
           mkdir -p "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"
 
+          # ★ 故意**不装 cmdline-tools**（没有 sdkmanager）：
+          #   flutter_tools/lib/src/android/gradle.dart 只在"SDK 里有可用的 sdkmanager"时
+          #   才传 `-Pflutter.sdkManagerPath=…`，而 FlutterPluginUtils.forceNdkDownload
+          #   看到这个属性就会**真的去调 sdkmanager 装 NDK** —— 实测那个 sdkmanager
+          #   （cmdline-tools 16111833）是个壳，会先去 dl.google.com 下新的 Android CLI：
+          #     Downloading Android CLI... Failed to download from
+          #     https://dl.google.com/android/cli/latest/linux_x86_64/android-cli
+          #   → 构建直接挂。我们不需要 NDK、也不需要 sdkmanager（包是自己解压装的、
+          #   许可是自己写的），所以留空反而走 Flutter 的 synthetic external native build 兜底。
           fetch() { curl -fSL --retry 3 --retry-delay 2 -o /tmp/pkg.zip "$BASE/$1"; }
           unpack_to() {
             rm -rf /tmp/unpack && mkdir -p /tmp/unpack
@@ -241,12 +250,6 @@ jobs:
           [ -d "$SDK/platforms/android-36" ]          || { fetch platform-36_r02.zip && unpack_to "$SDK/platforms/android-36"; }
           [ -d "$SDK/build-tools/36.0.0" ]            || { fetch build-tools_r36_linux.zip && unpack_to "$SDK/build-tools/36.0.0"; }
           [ -d "$SDK/platform-tools" ]                || { fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"; }
-          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            fetch commandlinetools-linux-16111833_latest.zip
-            rm -rf /tmp/unpack && mkdir -p /tmp/unpack "$SDK/cmdline-tools"
-            unzip -q /tmp/pkg.zip -d /tmp/unpack
-            mv /tmp/unpack/cmdline-tools "$SDK/cmdline-tools/latest"
-          fi
 
           # 许可文件：不写的话 AGP 认为许可没接受，直接拒绝构建
           printf '%s\n' \
@@ -258,7 +261,6 @@ jobs:
 
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           du -sh "$SDK"
           ls "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"
 

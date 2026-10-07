@@ -239,6 +239,37 @@ jq not found. Install it from https://stedolan.github.io/jq
    `https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`，
    找 `version == $FLUTTER_VERSION` 的 `archive` 字段（实测 3.47.1 → `stable/linux/flutter_linux_3.47.1-stable.tar.xz`）。
 
+#### ★ 第五个坑（2026-10-07 实测）：`sdkmanager` 会去下 "Android CLI"，Flutter 又会因此去装 NDK
+
+`assembleRelease` 阶段挂：
+
+```
+WARNING: The SDK Manager CLI tool (sdkmanager) is deprecated. Android CLI will be used instead.
+Downloading Android CLI...
+Error: Failed to download from https://dl.google.com/android/cli/latest/linux_x86_64/android-cli
+  io: Connection reset by peer (os error 104)
+> Process 'command '/root/android-sdk/cmdline-tools/latest/bin/sdkmanager'' finished with non-zero exit value 1
+```
+
+**链条**（都有代码证据）：
+
+1. 新版 `cmdline-tools` 里的 `sdkmanager` 只是个**壳**，第一次用就去 `dl.google.com` 下
+   "Android CLI" → 这台机器不通 ✗；
+2. 而 Flutter 的工具侧 `flutter_tools/lib/src/android/gradle.dart`（约 1070 行）
+   **只在 SDK 里有"可用的 sdkmanager"时才传** `-Pflutter.sdkManagerPath=…`；
+3. Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` 一看到这个属性，
+   就认为"NDK 可以自动装"，于是**真的调 sdkmanager 去装 NDK** ✗ → 上一条的壳 → 挂。
+
+**修法：CI 的 SDK 里干脆不装 `cmdline-tools`**（没有 `sdkmanager`）：
+
+- 我们的包本来就是**自己解压装的**、许可文件**自己写的**，根本不需要 sdkmanager；
+- 没有它 → `flutter.sdkManagerPath` 不传 → Flutter 走
+  **synthetic external native build** 兜底（不需要 NDK，`flutter build apk` 正常）；
+- 副作用（预期）：`flutter doctor -v` 会报一行 `cmdline-tools component is missing` ❌ ——
+  那一步是 `continue-on-error`，不影响构建。
+
+> 相关：如果哪天真的需要 NDK，得把 NDK 的 zip 也从镜像下好放进 SDK（同理绕开 dl.google.com）。
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**

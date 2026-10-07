@@ -25,7 +25,6 @@ BASE_FLUTTER="https://storage.googleapis.com/flutter_infra_release/releases/stab
 PLATFORM_ZIP="platform-36_r02.zip"
 BUILD_TOOLS_ZIP="build-tools_r36_linux.zip"
 PLATFORM_TOOLS_ZIP="platform-tools_r37.0.1-linux.zip"
-CMDLINE_TOOLS_ZIP="commandlinetools-linux-16111833_latest.zip"
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
@@ -80,18 +79,10 @@ mkdir -p "$SDK_DIR/platforms" "$SDK_DIR/build-tools" "$SDK_DIR/licenses"
   && echo "    platform-tools 已在（跳过）" \
   || unpack_one "$PLATFORM_TOOLS_ZIP" "$SDK_DIR/platform-tools"
 
-if [ ! -x "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" ]; then
-  tmp="$(mktemp -d)"
-  curl -fSL --retry 3 --retry-delay 2 -o "$tmp/pkg.zip" "$BASE_SDK/$CMDLINE_TOOLS_ZIP"
-  unzip -q "$tmp/pkg.zip" -d "$tmp/x"
-  rm -rf "$SDK_DIR/cmdline-tools"
-  mkdir -p "$SDK_DIR/cmdline-tools"
-  mv "$tmp/x/cmdline-tools" "$SDK_DIR/cmdline-tools/latest"
-  rm -rf "$tmp"
-  echo "    ✓ $CMDLINE_TOOLS_ZIP → $SDK_DIR/cmdline-tools/latest"
-else
-  echo "    cmdline-tools 已在（跳过）"
-fi
+# ★ 故意**不装 cmdline-tools**：只要 SDK 里有可用的 sdkmanager，Flutter 就会传
+#   `-Pflutter.sdkManagerPath=…`，其 gradle 插件看到后就会调 sdkmanager 去装 NDK；
+#   而新版 cmdline-tools 的 sdkmanager 是个壳，会先去 dl.google.com 下 Android CLI → 挂。
+#   我们不需要 NDK 也不需要 sdkmanager（包解压装、许可自己写），留空即可。
 
 # 许可文件：不写的话 AGP 认为许可没接受，直接拒绝构建
 printf '%s\n' \
