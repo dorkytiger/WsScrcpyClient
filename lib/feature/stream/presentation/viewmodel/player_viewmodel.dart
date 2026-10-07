@@ -26,8 +26,13 @@ import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 /// 职责边界：会话生命周期与解码器编排在这里触发，具体协议/解码实现都在 service 与
 /// [VideoDecoder] 的实现里；这里只维护"给 UI 看的状态"。
 class PlayerViewModel extends ChangeNotifier {
-  PlayerViewModel(this._sessionService, {VideoDecoder? decoder})
-    : _decoder = decoder ?? createVideoDecoder();
+  /// [isWeb] 只给测试用（VM 里 `isWebPlatform` 恒为 false，验不了 web 专属分支）。
+  PlayerViewModel(this._sessionService, {VideoDecoder? decoder, bool? isWeb})
+    : _isWeb = isWeb ?? isWebPlatform {
+    // late final + 初始化列表之外赋值：`createVideoDecoder` 需要拿 `_appendLog`（进日志面板），
+    // 而初始化列表里不允许碰 this。
+    _decoder = decoder ?? createVideoDecoder(onLog: _appendLog);
+  }
 
   /// 日志面板最多保留的条数（避免长时间运行内存增长）。
   static const int maxLogLines = 200;
@@ -39,7 +44,8 @@ class PlayerViewModel extends ChangeNotifier {
   static const int kInputDuplicateWindowMs = 30;
 
   final StreamSessionService _sessionService;
-  final VideoDecoder _decoder;
+  late final VideoDecoder _decoder;
+  final bool _isWeb;
 
   /// 输入链路诊断（用户报告的"点一次触发两次 / 总差上一次"靠这几条定性）。
   final AppLogger _inputLogger = AppLogger('Input');
@@ -66,6 +72,7 @@ class PlayerViewModel extends ChangeNotifier {
   StreamSubscription<String>? _logSubscription;
   StreamSubscription<Uint8List>? _frameSubscription;
   StreamSubscription<VideoSize>? _videoSizeSubscription;
+  StreamSubscription<String>? _decoderErrorSubscription;
   AsyncState<StreamSessionSnapshot> _state = const AsyncLoading();
   StreamTarget? _target;
   String? _authorization;
@@ -748,6 +755,21 @@ class PlayerViewModel extends ChangeNotifier {
     _decoderCreating = true;
     _notify();
     // 先订阅尺寸变化：创建/喂帧的**回执**里带尺寸，订阅晚一步就会漏掉第一条。
+    // 异步错误（web 的 WebCodecs 是回调式）：一发生就报出来，别等下一帧
+    // ——服务端只在画面变化时发帧，等不到下一帧就是一块无解释的黑屏。
+    _decoderErrorSubscription ??= _decoder.asyncErrors.listen((
+      String message,
+    ) {
+      if (_disposed || _decoderUnavailable) {
+        return;
+      }
+      _decoderUnavailable = true;
+      _decoderError = RemoteException(message: message);
+      _logs.add('解码器不可用：$message');
+      unawaited(_frameSubscription?.cancel());
+      _frameSubscription = null;
+      _notify();
+    });
     _videoSizeSubscription ??= _decoder.sizeChanges.listen((VideoSize size) {
       if (_disposed) {
         return;
@@ -775,6 +797,15 @@ class PlayerViewModel extends ChangeNotifier {
       _maybeLogRenderDiagnostics();
       // 只在这里订阅视频帧：之前的帧由广播流丢弃，避免喂给未就绪的解码器。
       _frameSubscription = _sessionService.videoFrames.listen(_onVideoFrame);
+      // ★ web 例外：那边解码器是"后建"的（要先有 DOM 平台视图），而服务端可能在我们订阅
+      // 之前就把「参数集 + 首个 IDR」推完并丢掉了（broadcast 流没有监听者）——设备画面静止时
+      // 又不会再发帧，于是永远 configure 不了 = 全黑无解释（2026-10-07 实测）。
+      // 所以补喂最近一段"从 IDR 开始"的序列（原生三端不依赖这个，保持原行为不动）。
+      if (_isWeb) {
+        for (final Uint8List frame in _sessionService.replayFramesForNewDecoder()) {
+          unawaited(_decoder.pushFrame(frame));
+        }
+      }
       _logs.add('原生解码器已启动（textureId=$_textureId）');
     } finally {
       _decoderCreating = false;
@@ -803,6 +834,8 @@ class PlayerViewModel extends ChangeNotifier {
   }
 
   Future<void> _teardownDecoder() async {
+    await _decoderErrorSubscription?.cancel();
+    _decoderErrorSubscription = null;
     await _frameSubscription?.cancel();
     _frameSubscription = null;
     await _videoSizeSubscription?.cancel();

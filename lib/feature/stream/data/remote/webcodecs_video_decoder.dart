@@ -27,8 +27,12 @@ import 'package:ws_scrcpy_client/feature/stream/data/remote/video_decoder.dart';
 /// 而且同一个 stream 关闭再开（[release] → [create]）时要复用同一个 DOM 元素，
 /// 否则视图层拿到的是被我们丢掉的旧元素。所以 DOM 是 static 的，只有解码器是每实例的。
 class WebCodecsVideoDecoder extends VideoDecoder {
-  WebCodecsVideoDecoder({AppLogger? logger})
+  WebCodecsVideoDecoder({AppLogger? logger, this.onLog})
     : _logger = logger ?? AppLogger('WebCodecs');
+
+  /// 把日志同时送进应用内日志面板（浏览器控制台之外再给一条路：
+  /// web 上"黑屏"这类问题，用户能直接在投流页点"日志"图标把原文发出来，不必开 F12）。
+  final void Function(String line)? onLog;
 
   /// 平台视图类型；视图层 `HtmlElementView(viewType: …)` 用它取到我们建的 DOM。
   static const String viewType = 'ws_scrcpy/web-video';
@@ -40,6 +44,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
   final AppLogger _logger;
   final StreamController<VideoSize> _sizeChanges =
       StreamController<VideoSize>.broadcast();
+  final StreamController<String> _errors = StreamController<String>.broadcast();
 
   static web.HTMLDivElement? _container;
   static web.HTMLCanvasElement? _canvas;
@@ -56,12 +61,17 @@ class WebCodecsVideoDecoder extends VideoDecoder {
   int _decodedCount = 0;
   int _decodeErrorCount = 0;
 
-  /// WebCodecs 的错误是**异步回调**（没有地方直接返回给调用方），
-  /// 所以先记下来，由下一次 [pushFrame] 带回给 viewmodel（UI 会显示可读错误 + 重试入口）。
+  /// WebCodecs 的错误是**异步回调**（没有地方直接返回给调用方）：
+  /// 立刻从 [asyncErrors] 通知上层（UI 显示可读错误 + 重试），同时也记一份，
+  /// 万一上层来不及订阅，下一次 [pushFrame] 还能把它带回去。
   String? _pendingError;
+  int _droppedUnconfigured = 0;
 
   @override
   Stream<VideoSize> get sizeChanges => _sizeChanges.stream;
+
+  @override
+  Stream<String> get asyncErrors => _errors.stream;
 
   @override
   VideoSize? get lastSize => _lastSize;
@@ -117,6 +127,15 @@ class WebCodecsVideoDecoder extends VideoDecoder {
     if (!_configured) {
       final codec = H264AnnexB.avcCodecString(frame);
       if (codec == null) {
+        // 没有 SPS 就没法 configure（codec 串只能从 SPS 来）。scrcpy 每条连接开头会先发
+        // 一条纯参数集的消息，正常不会走到这里；真走到了必须留下证据，否则就是黑屏无解释。
+        _droppedUnconfigured++;
+        if (_droppedUnconfigured == 1 || _droppedUnconfigured % 60 == 0) {
+          _log(
+            'WARNING 还没有收到 SPS/PPS，无法 configure（已丢弃 $_droppedUnconfigured 帧）'
+            '——按协议开头那条应当只含参数集；若一直是这条，说明帧里没带参数集',
+          );
+        }
         return successVoid();
       }
       _configure(codec);
@@ -187,6 +206,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
   Future<void> dispose() async {
     await release();
     await _sizeChanges.close();
+    await _errors.close();
   }
 
   /// 按 contain/cover 把 canvas 摆到控件里；CSS 像素 == Flutter 逻辑像素。
@@ -239,7 +259,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
       (int viewId) => _container!,
     );
     _viewFactoryRegistered = true;
-    _logger.info('web 视频平台视图已注册：$viewType（canvas + 2d 上下文）');
+    _log('web 视频平台视图已注册：$viewType（canvas + 2d 上下文）');
   }
 
   void _configure(String codec) {
@@ -248,7 +268,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
       web.VideoDecoderConfig(codec: codec, optimizeForLatency: true),
     );
     _configured = true;
-    _logger.info(
+    _log(
       'WebCodecs 已配置：codec=$codec，optimizeForLatency=true，'
       'Annex-B 输入（不传 description，见 AGENTS §9.3）',
     );
@@ -275,7 +295,7 @@ class WebCodecsVideoDecoder extends VideoDecoder {
       _applyGeometry();
       _decodedCount++;
       if (_decodedCount == 1) {
-        _logger.info('已解出第一帧并画进 canvas（${width}x$height）');
+        _log('已解出第一帧并画进 canvas（${width}x$height）');
       }
       final size = VideoSize(width, height);
       if (_lastSize != size) {
@@ -294,11 +314,24 @@ class WebCodecsVideoDecoder extends VideoDecoder {
     _decodeErrorCount++;
     _pendingError = error.message;
     if (_decodeErrorCount <= 3 || _decodeErrorCount % 60 == 0) {
-      _logger.warn(
+      _log(
         'WebCodecs 解码错误（第 $_decodeErrorCount 次）：${error.message}'
         '${_codec == null ? '' : '（codec=$_codec）'}',
       );
     }
+    // 立刻上报：否则"解码失败 + 画面静止 → 服务端不再给帧"就是一块无解释的黑屏。
+    if (_decodeErrorCount == 1 && !_errors.isClosed) {
+      _errors.add(
+        '${error.message}'
+        '${_codec == null ? '' : '（codec=$_codec）'}',
+      );
+    }
+  }
+
+  /// 一条日志走两个出口：浏览器控制台（`[WebCodecs]`）+ 应用内日志面板。
+  void _log(String message) {
+    _logger.info(message);
+    onLog?.call('[WebCodecs] $message');
   }
 
   void _clearCanvas() {

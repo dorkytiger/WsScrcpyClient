@@ -14,6 +14,7 @@ import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/input/video_viewport.dart';
 import 'package:ws_scrcpy_client/feature/stream/application/service/stream_session_service.dart';
 import 'package:ws_scrcpy_client/feature/stream/data/remote/stream_remote_datasource.dart';
+import 'package:ws_scrcpy_client/feature/stream/data/remote/video_decoder.dart';
 import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/view/player_page.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
@@ -63,6 +64,56 @@ class _FakeStreamRemoteDatasource extends StreamRemoteDatasource {
       return Result.failure(const RemoteException(message: '测试用：连接失败'));
     }
     return Result.success(StreamSession.fromTransport(uri, transport));
+  }
+}
+
+/// 假解码器：只为验证"异步错误要立刻报出来"这条链路（web 的 WebCodecs 是回调式）。
+class _FakeVideoDecoder extends VideoDecoder {
+  final StreamController<VideoSize> _sizes =
+      StreamController<VideoSize>.broadcast();
+  final StreamController<String> _errors = StreamController<String>.broadcast();
+
+  @override
+  Stream<VideoSize> get sizeChanges => _sizes.stream;
+
+  @override
+  Stream<String> get asyncErrors => _errors.stream;
+
+  @override
+  VideoSize? get lastSize => null;
+
+  @override
+  bool get hasTexture => true;
+
+  void emitError(String message) => _errors.add(message);
+
+  @override
+  Future<Result<int>> create() async => Result.success(7);
+
+  @override
+  Future<Result<void>> pushFrame(Uint8List frame) async => successVoid();
+
+  @override
+  Future<VideoSize?> getSize() async => null;
+
+  @override
+  Future<void> release() async {}
+
+  @override
+  Future<void> dispose() async {
+    await _sizes.close();
+    await _errors.close();
+  }
+}
+
+/// 记录"被喂了哪些帧"的假解码器：验证 web 上的**补喂**（订阅之前到达的参数集 + IDR）。
+class _RecordingVideoDecoder extends _FakeVideoDecoder {
+  final List<Uint8List> pushed = <Uint8List>[];
+
+  @override
+  Future<Result<void>> pushFrame(Uint8List frame) async {
+    pushed.add(frame);
+    return successVoid();
   }
 }
 
@@ -592,6 +643,10 @@ void main() {
     expect(find.byTooltip('收起顶栏（把高度让给画面）'), findsOneWidget);
     expect(find.text('测试设备'), findsOneWidget);
 
+    // ★ 横屏没有 AppBar → 也就没有返回箭头；浏览器更没有系统返回键，
+    // 所以顶栏里必须自带一个"返回设备列表"（用户实测："左上角也没有返回键"）。
+    expect(find.byTooltip('返回设备列表'), findsOneWidget);
+
     // 顶栏里的"铺满"按钮能切模式。
     expect(viewModel.videoFitMode, VideoFitMode.contain);
     await tester.tap(find.byTooltip('铺满屏幕（会裁掉画面上下边缘）'));
@@ -999,5 +1054,88 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  testWidgets('★ 解码器异步报错（web 的 WebCodecs 是回调式）：立刻出可读错误 + 重试，不等下一帧', (
+    WidgetTester tester,
+  ) async {
+    final transport = _FakeTransport();
+    final service = StreamSessionService(_FakeStreamRemoteDatasource(transport));
+    addTearDown(service.dispose);
+    final decoder = _FakeVideoDecoder();
+    addTearDown(decoder.dispose);
+    final viewModel = PlayerViewModel(service, decoder: decoder);
+    addTearDown(viewModel.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PlayerPage(viewModel: viewModel, target: target, title: '测试设备'),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    transport.emit(loadInitialInfoFixture());
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      if (viewModel.textureId != null) {
+        break;
+      }
+    }
+    expect(viewModel.textureId, isNotNull, reason: '解码器已建好，画面载体就位');
+    expect(find.text('重试解码'), findsNothing);
+
+    // 服务端画面静止时不再给帧，所以"等下一帧再报错"就是一块没有解释的黑屏
+    // （用户实测）。错误必须当场显示出来。
+    decoder.emitError('管道里没有可解码的数据');
+    await tester.pump();
+
+    expect(viewModel.decoderError, isNotNull);
+    expect(
+      viewModel.decoderError!.message,
+      contains('管道里没有可解码的数据'),
+    );
+    expect(find.text('重试解码'), findsOneWidget);
+  });
+
+  testWidgets('★ web：把"订阅之前到达"的参数集 + IDR 补喂给后建的解码器（否则永远全黑）', (
+    WidgetTester tester,
+  ) async {
+    // 复现真机时序：服务端的 header 与头几帧经常在同一个事件循环里投递完，
+    // 此时 viewmodel 还没订阅 videoFrames（广播流没有监听者 → 直接丢）；
+    // 设备画面静止时又不会再发帧 → 解码器永远拿不到 SPS = 全黑且无报错。
+    final transport = _FakeTransport();
+    final service = StreamSessionService(_FakeStreamRemoteDatasource(transport));
+    addTearDown(service.dispose);
+    final decoder = _RecordingVideoDecoder();
+    addTearDown(decoder.dispose);
+    final viewModel = PlayerViewModel(service, decoder: decoder, isWeb: true);
+    addTearDown(viewModel.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PlayerPage(viewModel: viewModel, target: target, title: '测试设备'),
+      ),
+    );
+    await tester.pump();
+
+    // 一口气推：header + 参数集 + IDR（中间不给微任务机会 = 订阅还没建立）。
+    final fixture = loadVideoFrameFixture();
+    transport.emit(loadInitialInfoFixture());
+    transport.emit(fixture[0]); // SPS + PPS
+    transport.emit(fixture[1]); // IDR
+    await tester.pump();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      if (decoder.pushed.isNotEmpty) {
+        break;
+      }
+    }
+
+    expect(
+      decoder.pushed,
+      <Uint8List>[fixture[0], fixture[1]],
+      reason: '参数集必须在最前面（web 端靠它算 codec 串），紧跟最近一个 IDR',
+    );
+    expect(viewModel.textureId, isNotNull);
   });
 }

@@ -40,6 +40,14 @@ abstract class VideoDecoder {
 
   Future<void> dispose();
 
+  /// 解码器的**异步错误**（默认空流：原生的错误都走 [Result]，从不走这条）。
+  ///
+  /// 为什么 web 需要单独一条：WebCodecs 的错误是**回调式**的，没有地方把它当返回值交出来。
+  /// 一开始的实现是"先记住，下一次 [pushFrame] 带回"——但服务端只在画面变化时发帧，
+  /// 解码一失败又可能再也等不到下一帧，结果就是**一块没有任何解释的黑屏**（用户实测）。
+  /// 所以改成错误一发生就立刻通知上层（UI 显示可读错误 + 重试入口）。
+  Stream<String> get asyncErrors => const Stream<String>.empty();
+
   /// 告诉解码器"画面该摆在控件的哪个位置"（默认空实现，只有 web 需要）。
   ///
   /// 为什么 web 需要：那边画面是 **DOM canvas 平台视图**，不参与 Flutter 的绘制，

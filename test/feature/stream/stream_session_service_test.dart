@@ -438,6 +438,46 @@ void main() {
     );
   });
 
+  test('★ 后建解码器的补喂缓冲：参数集 + 从最近一个 IDR 开始的帧（web 端全黑的根因）', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), isEmpty, reason: '还没收到任何帧');
+
+    // 真实顺序（夹具）：先一条纯参数集（SPS+PPS），再 IDR，再若干 P 帧。
+    final fixture = loadVideoFrameFixture();
+    final parameterSets = fixture[0];
+    final idr = fixture[1];
+    final pFrame = Uint8List.fromList(<int>[0, 0, 0, 1, 0x41, 1, 2, 3]);
+
+    transport.emit(parameterSets);
+    await pumpEventQueue();
+    // 只有参数集：能补，但没有参考帧，序列只有它自己。
+    expect(service.replayFramesForNewDecoder(), hasLength(1));
+
+    transport.emit(pFrame);
+    transport.emit(pFrame);
+    await pumpEventQueue();
+    expect(
+      service.replayFramesForNewDecoder(),
+      hasLength(1),
+      reason: 'IDR 之前的 P 帧不能补（没有参考帧，补了也解不出来）',
+    );
+
+    transport.emit(idr);
+    transport.emit(pFrame);
+    await pumpEventQueue();
+    final replay = service.replayFramesForNewDecoder();
+    expect(replay, hasLength(3), reason: '参数集 + IDR + IDR 之后的 P 帧');
+    expect(replay.first, parameterSets, reason: '参数集必须排在最前面：web 端靠它算 codec 串');
+    expect(replay[1], idr);
+
+    // 再来一个 IDR：缓冲只保留最近那个 GOP。
+    transport.emit(idr);
+    await pumpEventQueue();
+    expect(service.replayFramesForNewDecoder(), hasLength(2));
+  });
+
   test('★ 转屏不改编码边界：一条消息都不发（服务端不会重建编码器）', () async {
     await service.start(target);
     transport.emit(loadInitialInfoFixture());

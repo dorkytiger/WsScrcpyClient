@@ -14,6 +14,7 @@ import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
+import 'package:ws_scrcpy_client/core/stream/h264_annex_b.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_initial_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
@@ -462,6 +463,9 @@ class StreamSessionService {
     // 每条连接的诊断计数从 0 起（重连后那几个数字要能重新读）。
     _viewportUpdateSequence = 0;
     _lastEffectiveBounds = null;
+    _lastParameterSets = null;
+    _framesSinceIdr.clear();
+    _sawIdr = false;
     // 唤醒键也是"每条连接只发一次"：重连后设备可能又睡了，所以要重新允许发。
     _wakeSentForCurrentConnection = false;
     // 连接是新的：首发要等新的初始信息头；兜底定时器也重新算。
@@ -694,6 +698,81 @@ class StreamSessionService {
     return VideoSize(align(size.width), align(size.height));
   }
 
+  // ---------------------------------------------------------------------------
+  // 给"后建的解码器"补喂最近一段可解码序列（web 端实测必需，见 §17.6）
+  // ---------------------------------------------------------------------------
+
+  /// 最近一条**参数集**消息（SPS+PPS，没有片数据）。没有 SPS，web 端连 codec 串都算不出来。
+  Uint8List? _lastParameterSets;
+
+  /// 从**最近一个 IDR** 开始的所有帧（含它自己）。上限 [_replayFrameLimit]。
+  ///
+  /// 为什么从 IDR 开始：只补参数集是不够的——没有 IDR 就没有参考帧，P 帧解不出来。
+  final List<Uint8List> _framesSinceIdr = <Uint8List>[];
+
+  /// 补喂缓冲的上限（帧数）。静止画面下这个列表一直是空的或只有一两帧；
+  /// 画面连续变化时也没必要喂太长的历史（解码器只关心"最新的一个 GOP"）。
+  static const int _replayFrameLimit = 120;
+
+  /// 记住这条帧，供 [replayFramesForNewDecoder] 使用。
+  ///
+  /// 为什么需要它：**服务端可能在我们订阅 `videoFrames` 之前就把参数集 + 首个 IDR 推过来了**
+  /// （header 与头几帧经常在同一个事件循环里投递完），而广播流没有监听者就**直接丢**；
+  /// 设备画面静止时又不会再发帧 —— 于是解码器永远拿不到 SPS，**永远 configure 不了**，
+  /// 用户看到的就是"全黑、且没有任何错误"（2026-10-07 web 端实测）。
+  void _rememberFrameForLateDecoder(Uint8List frame) {
+    final units = H264AnnexB.split(frame);
+    final hasParams = units.any(
+      (H264NalUnit unit) => unit.type == 7 || unit.type == 8,
+    );
+    if (hasParams) {
+      _lastParameterSets = frame;
+    }
+    // 纯参数集的消息不是可解码样本（scrcpy 每条连接开头就发这么一条），
+    // 它只作为"算 codec 串 / 建格式描述"的输入，不进 GOP 序列。
+    final hasSlice = units.any(
+      (H264NalUnit unit) => unit.type == 1 || unit.type == 5,
+    );
+    if (!hasSlice) {
+      return;
+    }
+    if (units.any((H264NalUnit unit) => unit.type == 5)) {
+      _sawIdr = true;
+      _framesSinceIdr
+        ..clear()
+        ..add(frame);
+      return;
+    }
+    // 还没见过 IDR：这些 P 帧补了也解不出来（没有参考帧），干脆不记。
+    if (!_sawIdr) {
+      return;
+    }
+    if (_framesSinceIdr.length >= _replayFrameLimit) {
+      _framesSinceIdr.removeAt(0);
+    }
+    _framesSinceIdr.add(frame);
+  }
+
+  /// 这条连接里有没有见过 IDR（没见过就说明补喂序列还不成立）。
+  bool _sawIdr = false;
+
+  /// 给"刚建好的解码器"补喂最近一段**从 IDR 开始**的可解码序列（参数集在前）。
+  ///
+  /// 返回值为空表示没什么可补的（还没收到参数集 / 还没见过 IDR）。
+  List<Uint8List> replayFramesForNewDecoder() {
+    final frames = <Uint8List>[
+      ?_lastParameterSets,
+      ..._framesSinceIdr,
+    ];
+    if (frames.isNotEmpty) {
+      _log(
+        '补喂后建解码器：${frames.length} 条（参数集=${_lastParameterSets != null} '
+        'IDR+后续=${_framesSinceIdr.length}）——这些帧是在订阅之前到达的',
+      );
+    }
+    return frames;
+  }
+
   /// 服务端没有给 `VideoSettings` 时的回落值：**与服务端网页端 `VideoSettings` 的
   /// 默认构造逐字段一致**（`bitrate 0 / maxFps 0 / iFrameInterval 0 / bounds null`）。
   ///
@@ -829,6 +908,7 @@ class StreamSessionService {
   void _handleVideoFrame(Uint8List frame) {
     final frames = _snapshot.videoFrameCount + 1;
     final totalBytes = _snapshot.videoBytes + frame.length;
+    _rememberFrameForLateDecoder(frame);
     // 帧本体转发给解码器（M2）；没有订阅者时广播流是零开销的。
     if (!_videoFrames.isClosed) {
       _videoFrames.add(frame);

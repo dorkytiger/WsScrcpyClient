@@ -259,6 +259,9 @@ class _PlayerPageState extends State<PlayerPage> {
                 alignment: Alignment.topCenter,
                 child: _ChromeBar(
                   title: widget.title,
+                  // 横屏没有 AppBar → 也就没有返回箭头（浏览器更没有系统返回键）。
+                  // 原生端靠系统返回/手势，web 上必须给一个入口，否则回不到设备列表。
+                  onBack: () => Navigator.of(context).maybePop(),
                   fitMode: widget.viewModel.videoFitMode,
                   onToggleFit: () => widget.viewModel.setVideoFitMode(
                     widget.viewModel.videoFitMode.toggled,
@@ -337,7 +340,11 @@ class _VideoStage extends StatelessWidget {
 
   Widget _buildStage(BuildContext context, BoxConstraints constraints) {
     final textureId = viewModel.textureId;
-    if (textureId == null) {
+    // ★ 解码器出错时**即使旧纹理还在**也要把错误说出来（2026-10-07）。
+    // 否则 view 一直渲染那块已经死掉的画面：用户看到的是"没有任何解释的黑屏/卡住的画面"，
+    // 连"重试解码"都点不到。web 上最容易撞到——WebCodecs 一失败，服务端又只在画面变化时
+    // 发帧，就再也不会自己恢复（用户实测：全黑、无提示）。
+    if (textureId == null || viewModel.decoderError != null) {
       return _VideoPlaceholder(
         snapshot: snapshot,
         decoderError: viewModel.decoderError,
@@ -680,6 +687,7 @@ enum _MoreAction {
 class _ChromeBar extends StatelessWidget {
   const _ChromeBar({
     required this.title,
+    required this.onBack,
     required this.fitMode,
     required this.onToggleFit,
     required this.showLogs,
@@ -688,6 +696,10 @@ class _ChromeBar extends StatelessWidget {
   });
 
   final String title;
+
+  /// 返回设备列表（横屏没有 AppBar，只能自己给一个）。
+  final VoidCallback onBack;
+
   final VideoFitMode fitMode;
   final VoidCallback onToggleFit;
   final bool showLogs;
@@ -706,7 +718,12 @@ class _ChromeBar extends StatelessWidget {
           height: AppSpacing.xxl + AppSpacing.md,
           child: Row(
             children: <Widget>[
-              const SizedBox(width: AppSpacing.sm),
+              IconButton(
+                tooltip: '返回设备列表',
+                onPressed: onBack,
+                icon: const Icon(Icons.arrow_back),
+                visualDensity: VisualDensity.compact,
+              ),
               Expanded(
                 child: Text(
                   title,
