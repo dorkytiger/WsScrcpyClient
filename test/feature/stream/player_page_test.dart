@@ -301,7 +301,8 @@ void main() {
       return null;
     });
     final transport = _FakeTransport();
-    final viewModel = await pumpPlayer(tester, transport, withVideoFrame: true);
+    // 这条只量几何：避让是**无条件的**（"填满到灵动岛"开关已删），不需要 viewModel。
+    await pumpPlayer(tester, transport, withVideoFrame: true);
 
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
     final video = tester.getRect(find.byType(Texture));
