@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/core/platform/platform_capabilities.dart';
-import 'package:ws_scrcpy_client/core/state/async_state.dart';
 import 'package:ws_scrcpy_client/core/util/message_of.dart';
 import 'package:ws_scrcpy_client/feature/settings/application/service/settings_service.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/dto/save_settings_dto.dart';
@@ -63,15 +62,6 @@ class _ProfileSetupPageState extends State<ProfileSetupPage> {
     super.dispose();
   }
 
-  /// 密码写不进系统安全存储时的降级提示（受限环境把密码留在内存里，仅本次会话有效）。
-  String? _passwordPersistenceWarning() {
-    final state = widget.viewModel.state;
-    if (state is AsyncSuccess<AppSettingsVo> && !state.data.passwordPersisted) {
-      return '密码无法写入系统安全存储，本次会话有效，重启后需要重新填写';
-    }
-    return null;
-  }
-
   Future<void> _submit() async {
     final result = await widget.viewModel.createProfile(
       SaveSettingsDto(
@@ -91,15 +81,11 @@ class _ProfileSetupPageState extends State<ProfileSetupPage> {
       );
       return;
     }
-    final warning = _passwordPersistenceWarning();
-    if (warning != null) {
-      messenger.showSnackBar(SnackBar(content: Text(warning)));
-    }
     if (widget.isFirstRun) {
       await widget.onCompleted?.call();
       return;
     }
-    messenger.showSnackBar(SnackBar(content: Text(warning ?? '配置已创建')));
+    messenger.showSnackBar(const SnackBar(content: Text('配置已创建')));
     Navigator.of(context).maybePop();
   }
 

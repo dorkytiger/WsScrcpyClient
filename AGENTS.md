@@ -78,7 +78,7 @@ web 端还没上真机复验过**触摸**（`pointer-events:none` 那条只在�
 
 **这个仓库以前没有 git**（`fatal: not a git repository`）：2026-10-01 已 `git init` 并做首次提交
 （根 `.gitignore` 已补齐 `build/`、`.tmp/`、`.probe/`、`capture.bin`、日志、各平台 `ephemeral/` 等）。
-**注意**：密码只存在系统安全存储里，任何情况下都不要把凭据写进仓库。
+**注意**：密码现在就在本机数据库里（明文），但**依然不要把真实凭据写进仓库**（夹具、文档、脚本里一律用占位）。
 
 **今天踩过的坑都记在 §12.1–§12.7**（越界读、`destroying_` 未复位、参数下发方式、
 协商顺序 + 脏样本、禁止放大）。**动解码/协议前先读它们**，尤其：
@@ -122,7 +122,6 @@ parent 是 weak，还没接上宿主视图）→ 必须退到 `FlutterViewContro
 | Dart | 3.13.1 |
 | drift / drift_flutter | ^2.35.0 / ^0.3.1（本机 SQLite 持久化；`*.g.dart` 由 build_runner 生成） |
 | webview_all | ^1.4.3（Android / iOS / macOS / Windows / Linux 均有实现）|
-| flutter_secure_storage | ^9.2.4（只存密码） |
 | wakelock_plus | ^1.2.10（实际 1.5.2） |
 | url_launcher | ^6.3.1 |
 
@@ -202,7 +201,7 @@ tools\run_windows.cmd          # 等价于：TEMP/TMP→.tmp\ + --dart-define=WS
 ```
 
 - `WS_DATA_DIR` 让 drift 数据库落到工作区（见 `lib/core/database/app_database.dart`）；
-- 密码仍走系统安全存储；它在受限环境写不进去时会降级为"仅本次会话有效"并在界面提示；
+- 密码随配置一起落库（明文列）；没有"写不进安全存储"这种降级路径了；
 - 构建（`flutter build windows`）**不受这些限制影响**，见 §3.1。
 
 
@@ -236,10 +235,10 @@ tools/run_vt_replay_probe.sh
 
 **三条 macOS 特有的注意点**：
 
-1. **CocoaPods 必须装**（`brew install cocoapods`）：`flutter_secure_storage` 还不支持
-   Swift Package Manager，Flutter 会对它回退到 CocoaPods；没有 pod 时
-   `flutter build ios` 直接以 `CocoaPods not installed or not in valid state` 结束。
-   其余插件走 Flutter 3.47 默认开启的 SPM（`ios/Flutter/ephemeral/Packages/`）。
+1. ~~**CocoaPods 必须装**~~ **已不需要**（2026-10-07）：以前是 `flutter_secure_storage`
+   不支持 Swift Package Manager、Flutter 会对它回退到 CocoaPods；那个插件已经去掉，
+   现在所有插件都走 Flutter 3.47 默认开启的 SPM，`ios/Podfile` 与 `macos/Podfile` 也已删除。
+   以后若加了不支持 SPM 的插件，Flutter 会重新生成 Podfile，那时再装 CocoaPods。
 2. **`WS_BOOTSTRAP_*` 是本次为"能自动跑"加的**（`lib/core/debug/debug_bootstrap.dart`）：
    `WS_SCRCPY_AUTOSTART` 读的是 `Platform.environment`，而 iOS 应用进程**拿不到宿主环境变量**，
    所以这条必须走 `--dart-define`。模拟器上也没法可靠地手填首次进入的表单，没有它就没法自动化验证。
@@ -321,16 +320,20 @@ feature 之间**不互相 import presentation/data**。
 
 ## 7. 本地数据（drift/SQLite）与首次进入流程
 
-**表**（`schemaVersion = 1`，`onCreate → createAll()`；drift 默认列名为 snake_case）：
+**表**（`schemaVersion = 2` —— v1→v2 是补上 `password` 列，`onUpgrade` 里 `addColumn`；
+`onCreate → createAll()`；drift 默认列名为 snake_case）：
 
 | 表 | 列 |
 |---|---|
-| `connection_profiles` | `id` / `name` / `server_url` / `username` / `keep_screen_on` / `last_udid` / `is_active` / `created_at` / `updated_at` |
+| `connection_profiles` | `id` / `name` / `server_url` / `username` / **`password`（明文）** / `keep_screen_on` / `last_udid` / `is_active` / `created_at` / `updated_at` |
 | `recent_devices` | `id` / `udid`(UNIQUE) / `display_name` / `last_connected_at` |
 
-- **密码不在数据库里**：只存系统安全存储，键 `settings.password.<profileId>`。
-  安全存储**写不进去**时不报错：密码留在内存（仅本次会话有效），
-  `AppSettingsVo.passwordPersisted = false`，UI 据此提示"重启后需重填"；**读失败**按"没有密码"处理。
+- **密码明文入库**（2026-10-07 用户的决定："flutter_secure_storage 不要了，明文存就行"）：
+  就是 `connection_profiles.password` 这一列，与配置同一条记录、同一次写入。
+  **为什么去掉安全存储**：① macOS 上要 data protection keychain 授权（`-34018`，见 §16.1）；
+  ② 它不支持 SPM → 会把 iOS/macOS 整个工程拖回去用 CocoaPods（§3.3、§9.2 的 pod 那条）。
+  **代价**：能读到应用数据目录的人就能看到密码 —— 私有服务端自用可接受。
+  要重新加密只改这一列 + [ProfileLocalDatasource] 这一层。
 - **库文件位置**：`AppDatabase.databaseFileName = ws_scrcpy_client.sqlite`；
   目录优先取编译期常量 `WS_DATA_DIR`，否则 `getApplicationSupportDirectory()`，都会自动创建。
 - **全局最多一个 active**：切换/删除/新建都在事务里维护这条不变量；
@@ -642,7 +645,10 @@ M3 余项（剪贴板同步 `TYPE_GET/SET_CLIPBOARD`、软键盘文本注入 `TY
 否则面板那条复现不出来）。两条回归测试都做过 A/B：**改回老结构 → 红，修复版 → 绿**。
 （占位那条老代码溢出 28px；面板那条只有加上安全区才复现。）
 
-#### macOS 上"密码只本次会话有效"（`-34018`）：**已修**，见 §16.1
+#### ~~macOS 上"密码只本次会话有效"（`-34018`）~~：**整段已作废**（2026-10-07 去掉了安全存储）
+
+> 保留作历史：当时密码走 `flutter_secure_storage`，才需要 §16.1 那套钥匙串处理。
+> 现在密码是 `connection_profiles.password` 明文列，这整条路径（含下面的容器目录清理）都不需要了。
 
 `flutter run/build` 出来的 macOS debug 包是 **ad-hoc 签名**（`CODE_SIGN_IDENTITY = "-"`，
 实测 `TeamIdentifier=not set`），而 `flutter_secure_storage_macos` 9.x 默认走
@@ -1416,11 +1422,10 @@ VideoToolbox 的 H.264 输入按 **AVCC（4 字节大端长度前缀）** 解释
 - **文件进 Xcode**：三个新 Swift 文件已登记进 `ios/Runner.xcodeproj/project.pbxproj`
   （`plutil -lint` 通过、`xcodebuild -list` 能解析、`flutter build ios` 能编译）。
   以后再加文件照着改那四处（BuildFile / FileReference / group children / Sources phase）。
-- **CocoaPods 与 SPM 并存**：Flutter 3.47 默认开 Swift Package Manager，但
-  `flutter_secure_storage` 还不支持 SPM，Flutter 会对它**回退到 CocoaPods**。
-  所以 `brew install cocoapods` 是**硬前置**（没装时 `flutter build ios` 直接以
-  `CocoaPods not installed or not in valid state` 结束，报错信息里那句
-  "The following plugins do not support Swift Package Manager" 才是真正原因）。
+- ~~**CocoaPods 与 SPM 并存**~~ **已不需要 CocoaPods**（2026-10-07）：以前是
+  `flutter_secure_storage` 不支持 SPM、Flutter 对它回退到 CocoaPods；该插件已移除，
+  现在所有插件都走 SPM，`ios/Podfile` / `macos/Podfile`（及 lock）也已删除。
+  以后若加了不支持 SPM 的插件，Flutter 会重新生成 Podfile，那时再 `brew install cocoapods`。
 - **`Info.plist` 已加**（清单与"为什么"见 [`docs/apple-distribution.md`](docs/apple-distribution.md) §0）：
   `NSAppTransportSecurity.NSAllowsLocalNetworking`（局域网明文 `ws://<设备IPv4>:8886` 要它，
   比 `NSAllowsArbitraryLoads` 安全得多）、`NSLocalNetworkUsageDescription`、
@@ -1539,7 +1544,11 @@ videoChannel = ScrcpyVideoChannelHandler(
 
 ## 16. 2026-10-07：macOS 安全存储、拉伸窗口丢输入、清晰度开关
 
-### 16.1 macOS 密码写不进钥匙串（`-34018`）——已修
+> ⚠️ **本章的"安全存储"部分已作废**（2026-10-07 晚些时候用户决定去掉
+> `flutter_secure_storage`、密码改明文入库，见 §7）。§16.1 与 §16.2 里跟钥匙串相关的
+> 内容只作为"为什么当初要那么改"的历史记录保留**，不要再照着实现**。
+
+### 16.1 macOS 密码写不进钥匙串（`-34018`）——当时已修，现已随插件移除作废
 
 **现象**（用户贴回来的日志）：
 

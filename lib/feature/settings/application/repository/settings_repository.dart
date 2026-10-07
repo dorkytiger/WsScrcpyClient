@@ -3,23 +3,19 @@ import 'package:ws_scrcpy_client/core/log/app_logger.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/local/profile_local_datasource.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/local/recent_device_local_datasource.dart';
-import 'package:ws_scrcpy_client/feature/settings/data/local/secret_local_datasource.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/dto/save_settings_dto.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/entity/settings_profile_entity.dart';
 
-/// 连接配置的仓储：把"配置表 / 最近设备表 / 安全存储"三个数据源编排起来，
+/// 连接配置的仓储：把"配置表 / 最近设备表"两个数据源编排起来，
 /// 并在这一层统一把异常翻译成 `Result`（上层不再接触裸异常）。
+///
+/// 密码是配置表里的一列（**明文**），不再是独立的"安全存储"数据源。
 class SettingsRepository {
-  SettingsRepository(
-    this._profiles,
-    this._recentDevices,
-    this._secrets, {
-    AppLogger? logger,
-  }) : _logger = logger ?? AppLogger('SettingsRepository');
+  SettingsRepository(this._profiles, this._recentDevices, {AppLogger? logger})
+    : _logger = logger ?? AppLogger('SettingsRepository');
 
   final ProfileLocalDatasource _profiles;
   final RecentDeviceLocalDatasource _recentDevices;
-  final SecretLocalDatasource _secrets;
   final AppLogger _logger;
 
   /// 全部配置，按最近更新倒序。
@@ -37,15 +33,15 @@ class SettingsRepository {
   /// 是否已有任何配置（"首次进入"判定）。
   Future<Result<bool>> hasAnyProfile() => _guard('检查连接配置失败', _profiles.hasAny);
 
-  /// 新建配置并置为 active，同时写入密码；返回新配置 id。
+  /// 新建配置（含密码）并置为 active；返回新配置 id。
   ///
-  /// 注意顺序：先落库再写密码——密码写失败只降级（返回 sessionOnly），
-  /// 不会留下"有密码但没配置"的孤儿数据。
+  /// 密码与配置**同一条记录、同一次写入** —— 不存在"配置建好了但密码没落盘"的中间态。
   Future<Result<int>> createProfile(SaveSettingsDto dto) async {
     final draft = SettingsProfileEntity.draft(
       name: dto.name ?? '',
       serverUrl: dto.serverUrl,
       username: dto.username,
+      password: dto.password,
       keepScreenOn: dto.keepScreenOn,
     );
     final created = await _guard(
@@ -56,16 +52,11 @@ class SettingsRepository {
       return Result.failure(created.error!);
     }
     final id = created.data!;
-    final secret = await writePassword(id, dto.password);
-    if (secret.isError) {
-      // 配置已经建好，只是密码没落盘：把降级结果如实返回，避免上层误判为完全失败。
-      return Result.failure(secret.error!);
-    }
     _logger.info('新建连接配置成功：id=$id');
     return Result.success(id);
   }
 
-  /// 更新指定配置，并同步密码。
+  /// 更新指定配置（含密码）。
   Future<Result<void>> updateProfile(int id, SaveSettingsDto dto) async {
     final existing = await findProfile(id);
     if (existing.isError) {
@@ -82,16 +73,13 @@ class SettingsRepository {
           name: dto.name ?? profile.name,
           serverUrl: dto.serverUrl,
           username: dto.username,
+          password: dto.password,
           keepScreenOn: dto.keepScreenOn,
         ),
       ),
     );
     if (updated.isError) {
       return Result.failure(updated.error!);
-    }
-    final secret = await writePassword(id, dto.password);
-    if (secret.isError) {
-      return Result.failure(secret.error!);
     }
     return successVoid();
   }
@@ -100,17 +88,11 @@ class SettingsRepository {
   Future<Result<void>> activateProfile(int id) =>
       _guard('切换连接配置失败', () => _profiles.activateProfile(id));
 
-  /// 删除配置：先删库（含 active 回落），再删对应密码。
-  ///
-  /// 密码删除失败不影响整体成功（配置已经没了，残留密文无害），只记日志。
+  /// 删除配置（密码是同一行里的一列，删除记录即删除密码）。
   Future<Result<bool>> deleteProfile(int id) async {
     final deleted = await _guard('删除连接配置失败', () => _profiles.deleteProfile(id));
     if (deleted.isError) {
       return Result.failure(deleted.error!);
-    }
-    final removed = await _secrets.delete(id);
-    if (!removed) {
-      _logger.warn('配置已删除，但其密码未能从安全存储清除：profileId=$id');
     }
     return Result.success(deleted.data!);
   }
@@ -141,39 +123,6 @@ class SettingsRepository {
       '保存上次设备失败',
       () => _profiles.updateLastUdid(profileId: profile.id, udid: udid),
     );
-  }
-
-  /// 读取指定配置的密码：先看安全存储，再看"仅本次会话"的兜底。
-  Future<Result<String?>> readPassword(int profileId) async {
-    final persisted = await _secrets.readPersisted(profileId);
-    if (persisted != null) {
-      return Result.success(persisted);
-    }
-    return Result.success(_secrets.readSessionOnly(profileId));
-  }
-
-  /// 指定配置的密码是否只存在于内存（安全存储写失败后的降级状态）。
-  Future<Result<bool>> hasSessionOnlyPassword(int profileId) async {
-    return Result.success(_secrets.readSessionOnly(profileId) != null);
-  }
-
-  /// 写入指定配置的密码（可能降级为"仅本次会话有效"）。
-  Future<Result<SecretWriteOutcome>> writePassword(
-    int profileId,
-    String password,
-  ) async {
-    try {
-      return Result.success(await _secrets.write(profileId, password));
-    } catch (error, stackTrace) {
-      _logger.error('写入密码失败', error, stackTrace);
-      return Result.failure(
-        LocalStorageException(
-          message: '写入密码失败：$error',
-          exception: error,
-          stackTrace: stackTrace,
-        ),
-      );
-    }
   }
 
   /// 统一异常 → `Result` 翻译（[GlobalException] 原样透传）。

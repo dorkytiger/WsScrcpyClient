@@ -1,0 +1,102 @@
+// 把所有"连不上/被墙"的仓库换成本地镜像（阿里云）。**对所有 project / 所有 build 生效**。
+//
+// ── 为什么必须用 init script，而不是改项目里的 .gradle.kts ────────────────
+// 插件的 buildscript 仓库写在 **pub-cache 里的插件源码**中。例：
+//   flutter_secure_storage/android/build.gradle
+//     buildscript { repositories { google() }
+//       dependencies { classpath 'com.android.tools.build:gradle:8.5.1' } }
+// 项目自己的 4 个 .gradle.kts 覆盖不到它，实测报：
+//   A problem occurred configuring project ':flutter_secure_storage'.
+//     > Could not resolve com.android.tools.build:gradle:8.5.1.
+//        > Could not GET 'https://dl.google.com/dl/android/maven2/.../gradle-8.5.1.pom'
+//
+// ── ★ 坑：不能无脑往 project 级 repositories 里加 ─────────────────────────
+// Flutter 自己的 gradle 插件构建（includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")）
+// 在它的 settings.gradle.kts 里设了：
+//     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+// 往那种 build 的 project.repositories 里加仓库会在**解析阶段**直接失败：
+//     Build was configured to prefer settings repositories over project repositories
+//     but repository 'maven' was added by settings file 'settings.gradle.kts'
+// 所以这里按每个 build 的 repositoriesMode 决定：
+//   · settings 级（pluginManagement / dependencyResolutionManagement / 自己的 buildscript）永远改；
+//   · project 级只在该 build **没有** FAIL_ON_PROJECT_REPOS 时改（我们的 app build 是默认的
+//     PREFER_PROJECT，Flutter 的 resolve_dependencies.gradle.kts 就是在 project 级加 google() 的）。
+//
+// ── 用法 ────────────────────────────────────────────────────────────────
+//   · CI 里由工作流拷进 $GRADLE_USER_HOME/init.d/10-china-mirrors.gradle；
+//   · 镜像里烤了一份同样的（base64 内联在 tools/ci/Dockerfile，改这里要同步那边）；
+//   · 本地手动跑：gradle --init-script tools/ci/gradle-mirrors.init.gradle <task>
+def mirrors = [
+  'https://maven.aliyun.com/repository/google',        // Google Maven：AGP / AndroidX
+  'https://maven.aliyun.com/repository/public',        // Maven Central（+ jcenter 兜底）
+  'https://maven.aliyun.com/repository/gradle-plugin', // Gradle Plugin Portal
+]
+
+def blockedHosts = [
+  'dl.google.com', 'maven.google.com',
+  'repo.maven.apache.org', 'repo1.maven.org',
+  'plugins.gradle.org', 'jcenter.bintray.com', 'repo.gradle.org',
+]
+
+def isMaven = { repo ->
+  repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository
+}
+def isBlocked = { repo ->
+  isMaven(repo) && blockedHosts.contains((repo.url?.host ?: ''))
+}
+def hasMirror = { handler ->
+  handler.any { repo -> isMaven(repo) && (repo.url?.host ?: '') == 'maven.aliyun.com' }
+}
+
+def rewrite = { handler ->
+  handler.removeAll { isBlocked(it) }
+  if (!hasMirror(handler)) {
+    mirrors.each { m -> handler.maven { url = m } }
+  }
+}
+
+// 哪些 build 禁止 project 级仓库（键 = Gradle 实例，也就是"每个 build 一份"）
+def failOnProjectRepos = [:].withDefault { false }
+
+settingsEvaluated { settings ->
+  def mode = 'PREFER_PROJECT'
+  try {
+    mode = settings.dependencyResolutionManagement.repositoriesMode.get().toString()
+  } catch (Throwable ignored) {
+    // 老 Gradle 或没有这个 API：按默认 PREFER_PROJECT 处理
+  }
+  failOnProjectRepos[settings.gradle] = (mode == 'FAIL_ON_PROJECT_REPOS')
+
+  rewrite(settings.pluginManagement.repositories)
+  rewrite(settings.buildscript.repositories)
+  try {
+    rewrite(settings.dependencyResolutionManagement.repositories)
+  } catch (Throwable ignored) {
+    // 没声明过 dependencyResolutionManagement 就别硬碰
+  }
+}
+
+gradle.projectsLoaded { g ->
+  def skipProjectRepos = failOnProjectRepos[g] == true
+  g.rootProject.allprojects { project ->
+    rewrite(project.buildscript.repositories)
+    if (!skipProjectRepos) {
+      try {
+        rewrite(project.repositories)
+      } catch (Throwable ignored) {
+        // 该 build 禁止 project 级仓库：只留 settings/buildscript 那两处
+      }
+    }
+  }
+}
+
+// 插件/项目脚本会在创建之后再声明一次 google()，评估完再扫一遍
+gradle.afterProject { project ->
+  rewrite(project.buildscript.repositories)
+  if (failOnProjectRepos[project.gradle] != true) {
+    try {
+      rewrite(project.repositories)
+    } catch (Throwable ignored) {
+    }
+  }
+}

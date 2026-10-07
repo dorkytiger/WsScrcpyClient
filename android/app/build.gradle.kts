@@ -36,6 +36,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // 注意：**不要**用 `packaging { jniLibs { keepDebugSymbols += "**/*.so" } }` 来绕开
+    // `stripReleaseDebugSymbols` —— 实测那样打出来的 universal APK 有 **517MB**
+    // （引擎 .so 带着调试符号进包；对比：iOS ipa 只有 22MB）。
+    // 正确做法是让 AGP 能真正 strip：CI 里装**真 NDK**（腾讯镜像的
+    // `android-ndk-r28c-linux.zip` == NDK 28.2.13676358，见 tools/ci/Dockerfile），
+    // 它提供 `ndk/<版本>/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip`。
 }
 
 kotlin {

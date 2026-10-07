@@ -11,9 +11,8 @@ import 'package:ws_scrcpy_client/feature/settings/data/model/vo/settings_profile
 
 /// 设置用例：校验入参、决定"保存到哪套配置"、把多套配置的存储编排成 Result。
 ///
-/// 构造需要一个 [SettingsRepository]（组合 profile 表 / 最近设备表 / 安全存储）。
-/// 密码只在安全存储里，写失败会降级为"仅本次会话有效"，
-/// 具体状态通过 [AppSettingsVo.passwordPersisted] 暴露给 UI。
+/// 构造需要一个 [SettingsRepository]（组合 profile 表 / 最近设备表）。
+/// 密码是 profile 表里的一列（**明文**，见 `ConnectionProfiles` 的类文档），随配置一起读写。
 class SettingsService {
   /// [isWeb] 只给测试用（VM 里 `isWebPlatform` 恒为 false，验不了 web 分支）；
   /// 生产代码不传，取编译期常量。
@@ -52,9 +51,7 @@ class SettingsService {
 
   /// 保存到当前生效配置；没有 active 配置时**新建一套并置为 active**。
   ///
-  /// [SaveSettingsDto.id] 非空时保存到指定配置。
-  /// 密码未持久化不属于失败：返回值仍是成功，状态见随后 [load] 的
-  /// `passwordPersisted`（或直接用 [saveAndLoad]）。
+  /// [SaveSettingsDto.id] 非空时保存到指定配置。密码与配置同一次写入，失败即为失败。
   Future<Result<void>> save(SaveSettingsDto dto) async {
     final normalized = _normalize(dto);
     if (normalized.isError) {
@@ -88,7 +85,7 @@ class SettingsService {
     return successVoid();
   }
 
-  /// 保存后立刻回读：UI 一次调用即可拿到含 `passwordPersisted` 的最新状态。
+  /// 保存后立刻回读：UI 一次调用即可拿到最新状态。
   Future<Result<AppSettingsVo>> saveAndLoad(SaveSettingsDto dto) async {
     final saved = await save(dto);
     if (saved.isError) {
@@ -139,7 +136,7 @@ class SettingsService {
     return _repository.activateProfile(id);
   }
 
-  /// 删除配置（连同它的密码）。
+  /// 删除配置（密码是同一行的一列，随之一起删除）。
   ///
   /// 删除的是 active 配置时，仓储会在同一事务里把**最近更新**的一条剩余配置
   /// 提升为 active；没有剩余配置就不存在 active，[hasAnyProfile] 随即返回 false。
@@ -157,38 +154,19 @@ class SettingsService {
     return successVoid();
   }
 
-  /// 组装 VO（含密码与其持久化状态）。
-  Future<Result<AppSettingsVo>> _toSettingsVo(
-    SettingsProfileEntity profile,
-  ) async {
-    final passwordResult = await _repository.readPassword(profile.id);
-    if (passwordResult.isError) {
-      return Result.failure(passwordResult.error!);
-    }
-    final password = passwordResult.data ?? '';
-    var passwordPersisted = true;
-    if (password.isNotEmpty) {
-      final sessionOnly = await _repository.hasSessionOnlyPassword(profile.id);
-      if (sessionOnly.isError) {
-        return Result.failure(sessionOnly.error!);
-      }
-      passwordPersisted = !(sessionOnly.data ?? false);
-      if (!passwordPersisted) {
-        _logger.warn('密码仅本次会话有效（安全存储不可写）：profileId=${profile.id}');
-      }
-    }
+  /// 组装 VO（密码就是 profile 表里的那一列）。
+  Result<AppSettingsVo> _toSettingsVo(SettingsProfileEntity profile) {
     return Result.success(
       AppSettingsVo(
         serverUrl: profile.serverUrl,
         username: profile.username,
-        password: password,
+        password: profile.password,
         lastUdid: profile.lastUdid,
         keepScreenOn: profile.keepScreenOn,
         profileId: profile.id,
         profileName: profile.name.isEmpty
             ? _hostOf(profile.serverUrl)
             : profile.name,
-        passwordPersisted: passwordPersisted,
       ),
     );
   }

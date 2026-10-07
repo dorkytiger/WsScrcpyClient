@@ -60,6 +60,30 @@ tools\build_release.cmd -Platform windows     # 产物在 dist\
 
 不需要 Android SDK（Windows job 只出桌面包）。自检：`flutter doctor -v` 里 Windows 那一项全绿。
 
+## 1.1 方案 B：**不常在线的机器**（Mac / Windows）怎么接
+
+**当前范围（2026-10-07 定的）**：CI 只跑 **`verify` + `android` + `web`**（都在 24/7 的 Linux
+runner 上）。Mac / Windows 那两台不保证在线，**先不接**；接的时候按下面这条纪律来。
+
+**硬纪律：任何"依赖某台机器在线"的 job 默认必须是关的** ——
+job 一旦被派发就会**一直等** runner 出现（就是那条"等待带有以下标签的运行器"），
+每次 tag 都会留下一条永远不开始的红记录，还得手动取消/重跑。
+
+所以用**仓库变量开关**（方案 B）：
+
+| 平台 | job 写法 | 默认 |
+|---|---|---|
+| Windows（已就绪） | `windows` job + `if: ${{ vars.WINDOWS_RUNNER == 'true' }}` | **关**（不设变量即不派发） |
+| macOS / iOS（待加） | 照抄一个 `macos` job + `if: ${{ vars.MACOS_RUNNER == 'true' }}`；runner 必须是 **host 模式**（Apple 的构建进不了 Linux 容器） | 关 |
+
+**人在线时的操作**：仓库 **Settings → Actions → Variables** 打开对应变量 →
+在 Actions 里对该次运行点 **Re-run**（或手动 `workflow_dispatch`）→ 跑完再把变量关掉。
+
+**为什么不改成"离线补齐脚本"**：那是我提的方案 A（机器上线后查 Release 缺哪个附件、自动构建上传），
+不排队、能自动补，但要多维护一个脚本 + 一个写权限 token。**用户 2026-10-07 选了 B**；
+如果哪天真嫌"每次要手动开变量"麻烦，再按 A 换（脚本形状：查 Forgejo API 的最近 N 个 tag →
+比对 Release 附件名 → 缺哪个构建哪个 → 上传 → 已存在跳过，幂等）。
+
 ## 2. 注册 runner
 
 ### 2.1 Linux runner：标签 = "**标签名 : 用哪个镜像跑**"
@@ -98,6 +122,333 @@ $ curl -s https://data.forgejo.org/v2/oci/node/tags/list | head -c 120
 
 也就是说 `oci/ubuntu:24.04` **不是 tag 写错，是那个路径从来没有过**，
 而 `oci/node`、`oci/python`、`oci/golang`、`oci/alpine`、`oci/debian` 都有。
+
+#### ★ 另一个镜像坑（2026-10-07 实测）：镜像里**只有 `actions/*`**，第三方 action 一律 404
+
+现象（job 已经能起来，但取 action 时挂）：
+
+```
+☁️  git clone 'https://data.forgejo.org/subosito/flutter-action' # ref=v2
+⚙️ [runner]: unable to probe object format ... remote: Not found.
+   fatal: repository 'https://data.forgejo.org/subosito/flutter-action/' not found
+```
+
+runner 的 `DEFAULT_ACTIONS_URL` 默认指向 **Forgejo 自己的 action 镜像 `data.forgejo.org`**，
+而那个镜像只镜像官方的 `actions/*`。探法（200 = 有、302 = 没有）：
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  'https://data.forgejo.org/subosito/flutter-action/info/refs?service=git-upload-pack'
+```
+
+实测：`actions/checkout` / `actions/setup-java` / `actions/upload-artifact` / `actions/cache` = **200**；
+`subosito/flutter-action` / `android-actions/setup-android` / `softprops/action-gh-release` = **302（没有）**。
+
+**修法（工作流侧，不动服务器）**：第三方 action 写**全 URL**，官方 `actions/*` 继续走镜像。
+
+```yaml
+      - uses: actions/checkout@v4                              # 镜像里有 ✓
+      - uses: https://github.com/subosito/flutter-action@v2     # 必须全 URL
+      - uses: https://github.com/android-actions/setup-android@v3
+```
+
+> 如果那台 runner **连 github.com 也不通**，两条退路：
+> ① 在 runner 的 `config.yml` 里把 `[actions] DEFAULT_ACTIONS_URL` 指到一个可达的镜像；
+> ② 干脆不用第三方 action —— Flutter 用 `curl` 下 tar.xz + `tar -xJf` 自己装
+> （还能顺手换国内镜像绕开 `storage.googleapis.com`），Android SDK 同理下 cmdline-tools。
+
+#### ★★ 第三个坑（2026-10-07 实测）：这台 runner **连不上 `dl.google.com`**
+
+在 `lingke` 上实测的连通性（用户跑的 curl）：
+
+| 主机 | 结果 | 影响 |
+|---|---|---|
+| `github.com` | 200 | 第三方 action（全 URL）能取 ✓ |
+| `storage.googleapis.com` | **400**（= 可达，Google 只是拒了根路径 HEAD） | Flutter SDK 能下 ✓ |
+| `api.adoptium.net` | 200 | JDK 能下 ✓ |
+| `repo.maven.apache.org` | 200 | Maven Central 能下 ✓ |
+| **`dl.google.com`** | **000 / FAIL** | ❌ 既是 Android SDK 下载站，也是 Google Maven 的站（AGP/AndroidX 在上面） |
+
+**两条修法（都已实施，纯工作流侧、不动服务器）**：
+
+1. **Android SDK 组件改从腾讯镜像取 zip**（不用 `sdkmanager` —— 它只会去 `dl.google.com`）：
+
+   ```
+   https://mirrors.cloud.tencent.com/AndroidSDK/
+     platform-36_r02.zip                    → platforms/android-36   （compileSdk 36）
+     build-tools_r36_linux.zip              → build-tools/36.0.0    ★ 注意下划线
+     platform-tools_r37.0.1-linux.zip       → platform-tools
+     commandlinetools-linux-16111833_latest.zip → cmdline-tools/latest
+   ```
+
+   ★ **文件名陷阱**：Google 从 build-tools **35** 起把 `-` 换成了 `_`
+   （`build-tools_r36_linux.zip`，而 34 是 `build-tools_r34-linux.zip`）。
+   权威清单是 Google 的 `https://dl.google.com/android/repository/repository2-3.xml`
+   （从能访问的机器上拉下来 grep 即可）。
+   另外**必须手写许可文件**（`$SDK/licenses/android-sdk-license` 等），否则 AGP 直接拒绝构建。
+
+2. **Gradle 仓库换阿里云镜像**：项目里写死 `google()` 的只有 4 个 `.gradle.kts`
+   （`android/build.gradle.kts`、`android/settings.gradle.kts`，以及 Flutter SDK 的
+   `packages/flutter_tools/gradle/{resolve_dependencies,settings}.gradle.kts`）。
+   CI 里对**这次检出**做 `sed` 替换（不改仓库文件），并在末尾加一道**门禁**：
+   只要还剩一处 `google()` 就报错退出 —— 否则它会去连不通的站、拖慢甚至挂掉构建。
+
+   ```
+   google()             → maven("https://maven.aliyun.com/repository/google")
+   mavenCentral()       → maven("https://maven.aliyun.com/repository/public")
+   gradlePluginPortal() → maven("https://maven.aliyun.com/repository/gradle-plugin")
+   ```
+
+> **还没验证的一个点**：`pub.dev` 那台机器通不通（`flutter pub get` 要用）。
+> 如果不通，就在 workflow 里加 `PUB_HOSTED_URL=https://pub.flutter-io.cn`（Flutter 中国镜像）。
+
+#### ★ 第四个坑（2026-10-07 实测）：`subosito/flutter-action` 需要容器里有 `jq`
+
+```
+装 Flutter（版本与 AGENTS.md §2 对齐）  1s
+jq not found. Install it from https://stedolan.github.io/jq
+⚙️ [runner]: exitcode '1': failure
+```
+
+`oci/node:20-bookworm` 里没有 `jq`，而那个 action 依赖它。**修法：干脆不用第三方 action** ——
+自己下官方 tar.xz（版本从 `FLUTTER_VERSION` 环境变量来，与 AGENTS §2 对齐）：
+
+```yaml
+- name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
+  run: |
+    set -e
+    FLUTTER_HOME="$HOME/flutter"
+    if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+      URL="https://storage.googleapis.com/flutter_infra_release/flutter_infra_release/…"
+      # 实际地址：https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz
+      curl -fSL --retry 3 -o /tmp/flutter.tar.xz "$URL"
+      tar -xJf /tmp/flutter.tar.xz -C "$(dirname "$FLUTTER_HOME")"
+    fi
+    echo "$FLUTTER_HOME/bin" >> "$GITHUB_PATH"
+    git config --global --add safe.directory "$FLUTTER_HOME"   # 容器里 root 跑，否则 git 报 dubious ownership
+    flutter --version
+```
+
+顺带三个纪律：
+
+1. **「基础工具」步骤必须排在最前面**（`xz` 解 Flutter 的 tar.xz、`unzip` 解 SDK 的 zip、
+   `zip` 给 web 打包），否则后面的解压步骤会以 `command not found` 挂；
+2. **官方 `actions/*` 用短名即可**（镜像里有：实测 `checkout`/`setup-java`/`upload-artifact`/`cache` 都 200），
+   只有第三方 action 才需要写全 URL（或者干脆像这里一样不用它）；
+3. 确认 tarball 地址的最稳方式：拉
+   `https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`，
+   找 `version == $FLUTTER_VERSION` 的 `archive` 字段（实测 3.47.1 → `stable/linux/flutter_linux_3.47.1-stable.tar.xz`）。
+
+#### ★ 第五个坑（2026-10-07 实测）：`sdkmanager` 会去下 "Android CLI"，Flutter 又会因此去装 NDK
+
+`assembleRelease` 阶段挂：
+
+```
+WARNING: The SDK Manager CLI tool (sdkmanager) is deprecated. Android CLI will be used instead.
+Downloading Android CLI...
+Error: Failed to download from https://dl.google.com/android/cli/latest/linux_x86_64/android-cli
+  io: Connection reset by peer (os error 104)
+> Process 'command '/root/android-sdk/cmdline-tools/latest/bin/sdkmanager'' finished with non-zero exit value 1
+```
+
+**链条**（都有代码证据）：
+
+1. 新版 `cmdline-tools` 里的 `sdkmanager` 只是个**壳**，第一次用就去 `dl.google.com` 下
+   "Android CLI" → 这台机器不通 ✗；
+2. 而 Flutter 的工具侧 `flutter_tools/lib/src/android/gradle.dart`（约 1070 行）
+   **只在 SDK 里有"可用的 sdkmanager"时才传** `-Pflutter.sdkManagerPath=…`；
+3. Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` 一看到这个属性，
+   就认为"NDK 可以自动装"，于是**真的调 sdkmanager 去装 NDK** ✗ → 上一条的壳 → 挂。
+
+**修法：CI 的 SDK 里干脆不装 `cmdline-tools`**（没有 `sdkmanager`）：
+
+- 我们的包本来就是**自己解压装的**、许可文件**自己写的**，根本不需要 sdkmanager；
+- 没有它 → `flutter.sdkManagerPath` 不传 → Flutter 走
+  **synthetic external native build** 兜底（不需要 NDK，`flutter build apk` 正常）；
+- 副作用（预期）：`flutter doctor -v` 会报一行 `cmdline-tools component is missing` ❌ ——
+  那一步是 `continue-on-error`，不影响构建。
+
+> 相关：如果哪天真的需要 NDK，得把 NDK 的 zip 也从镜像下好放进 SDK（同理绕开 dl.google.com）。
+
+#### ★ 第六个坑（2026-10-07 实测）：`NDK not configured. Download it with SDK manager.`
+
+去掉 `cmdline-tools` 之后，构建走到 `assembleRelease` 时报：
+
+```
+> A problem occurred configuring project ':app'.
+   > NDK not configured. Download it with SDK manager. Preferred NDK version is '28.2.13676358'.
+```
+
+**链条**（代码证据）：
+
+1. Flutter 的 gradle 插件 `FlutterPluginUtils.forceNdkDownload()` **总是**想让 AGP 拿到 NDK
+   （目的：让带原生代码的插件能构建）；
+2. 它先看"配置的 NDK 版本在不在已安装列表里"，不在就调 `sdkmanager` 装 —— 我们没有
+   `cmdline-tools`（第五个坑故意去掉的），于是退到"合成 external native build"兜底：
+   它**故意让 AGP 以为项目需要 NDK** → AGP 反过来报 `NDK not configured` ✗；
+3. 而"已安装"的判定极宽松 ——
+   `flutter_tools/lib/src/android/gradle.dart` 的 `_getInstalledNdkVersionsForGradle()`：
+   只 `list` 一下 `$SDK/ndk/`，**检查每个版本目录下有没有 `source.properties`（内容都不读）**。
+
+**修法：放一个 NDK 标记文件（1 个字节，不用下 1GB 的真 NDK）**
+
+```bash
+NDK_VERSION=28.2.13676358        # 取自 Flutter 的 FlutterExtension.kt（ndkVersion）
+mkdir -p "$SDK/ndk/$NDK_VERSION"
+printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "$NDK_VERSION" \
+  > "$SDK/ndk/$NDK_VERSION/source.properties"
+```
+
+有了它 → 该版本被认为"已装" → `forceNdkDownload` 直接 `return@finalizeDsl` →
+既不调 sdkmanager、也不配合成 externalNativeBuild → AGP 不再要 NDK ✓。
+`tools/ci/Dockerfile`、`tools/prepare_ci_host.sh`、工作流的 SDK 步骤里都放了
+（版本是从 Flutter SDK 的 `FlutterExtension.kt` 里现读的，升级 Flutter 后自动跟上）。
+
+> ⚠️ **以后加了带原生代码（NDK）的插件，就必须换成真 NDK**：把
+> `android-ndk-r<xx>-linux.zip` 解到 `$SDK/ndk/<版本>/`。标记文件只是"项目没有原生代码"的取巧。
+
+**★ 更正（同一天，实测打脸）：光有标记文件还不够，要装真 NDK。**
+标记只是让 Flutter 跳过"自动装 NDK"；但 **AGP 的 `stripReleaseDebugSymbols` 照样会**去调
+`ndk/<版本>/toolchains/llvm/prebuilt/<host>/bin/llvm-strip` 剥 .so 的调试符号 →
+标记文件下没有这个可执行文件 → `A problem occurred starting process ... llvm-strip` 失败。
+
+| 做法 | 结果 |
+|---|---|
+| 只放标记文件 | 打包阶段 `stripReleaseDebugSymbols` 失败 |
+| 放标记 + `keepDebugSymbols += "**/*.so"`（跳过 strip） | 能过，但 **universal APK 517MB**（引擎 .so 带调试符号进包；对比 iOS ipa 只有 22MB）✗ |
+| **装真 NDK**（现在采用） | strip 正常，APK 回到正常体积；标记只在真 NDK 装不上时兜底 |
+
+真 NDK **腾讯镜像里有**：`android-ndk-r28c-linux.zip` == NDK `28.2.13676358`
+（正是 Flutter 3.47 默认要的版本，文件名取自官方索引 `repository2-3.xml` 的 `ndk;28.2.13676358`）。
+解压后放到 `$SDK/ndk/28.2.13676358/`（zip 里那层目录名是 `android-ndk-r28c/`，要改名）。
+
+#### ★ 第七个坑（2026-10-07 实测）：**插件自己的 buildscript** 仍然去 `dl.google.com`
+
+```
+> 下面的例子来自当时还在依赖里的 `flutter_secure_storage`（2026-10-07 已移除，
+> 但它踩出来的这条规律对所有插件都成立：**插件的 buildscript 仓库写在 pub-cache 里**）。
+
+A problem occurred configuring project ':flutter_secure_storage'.
+> Could not resolve all artifacts for configuration 'classpath'.
+   > Could not resolve com.android.tools.build:gradle:8.5.1.
+      > Could not GET 'https://dl.google.com/dl/android/maven2/.../gradle-8.5.1.pom'
+         > Remote host terminated the handshake
+   > 'kotlin-android' plugin requires one of the Android Gradle plugins.
+```
+
+（最后那条 `kotlin-android` 报错是**连带**的：AGP 的 classpath 没解析出来，插件项目就应用不上 AGP。）
+
+**根因**：插件的 buildscript 仓库写在 **pub-cache 里的插件源码**中，项目自己的 4 个
+`.gradle.kts` 覆盖不到：
+
+```groovy
+// ~/.pub-cache/hosted/pub.dev/flutter_secure_storage-*/android/build.gradle
+buildscript {
+    repositories { google() }                      // ← dl.google.com，这台机器不通
+    dependencies { classpath 'com.android.tools.build:gradle:8.5.1' }
+}
+```
+
+**修法：用 Gradle init script 全局改仓库**（对所有 project 生效，含所有依赖里的插件）——
+`tools/ci/gradle-mirrors.init.gradle`：把 `dl.google.com` / `maven.google.com` /
+`repo.maven.apache.org` / `repo1.maven.org` / `plugins.gradle.org` / `jcenter` **移除**，
+换成阿里云的 google / public / gradle-plugin 三个仓（内容与官方一致：AGP 8.5.1 与
+Kotlin 2.4.0 都实测 200）。三个时机都要挂：`settingsEvaluated`（pluginManagement）、
+`projectsLoaded`（各 project 的 buildscript/repositories）、`afterProject`
+（插件在项目创建**之后**又会声明一次 `google()`）。
+
+安装位置：`$GRADLE_USER_HOME/init.d/10-china-mirrors.gradle`（CI 从检出里拷、镜像里也烤了一份）。
+
+**★ 补丁（同一天马上就踩到）：init script 不能无脑往 project 级 `repositories` 加仓库。**
+
+Flutter 自己的 gradle 插件构建（`includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")`）
+在它的 `settings.gradle.kts` 里设了：
+
+```kotlin
+repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+```
+
+往那种 build 的 project 级仓库里加东西，会在**解析阶段**直接失败：
+
+```
+Error resolving plugin [id: 'dev.flutter.flutter-plugin-loader', version: '1.0.0']
+> Build was configured to prefer settings repositories over project repositories
+  but repository 'maven' was added by settings file 'settings.gradle.kts'
+```
+
+所以 init script 现在按**每个 build 的 `repositoriesMode`** 分流：
+
+| 层级 | 是否改 |
+|---|---|
+| `settings.pluginManagement.repositories` | ✅ 总是改 |
+| `settings.buildscript.repositories` | ✅ 总是改 |
+| `settings.dependencyResolutionManagement.repositories` | ✅ 总是改（有才碰） |
+| project 的 `buildscript.repositories` | ✅ 总是改（buildscript 解析不受该模式管辖 —— 这正是修复 `:flutter_secure_storage` 的那条路） |
+| project 的 `repositories` | ⚠️ **只在该 build 不是 `FAIL_ON_PROJECT_REPOS` 时改**（我们的 app build 是默认的 `PREFER_PROJECT`；Flutter 的 `resolve_dependencies.gradle.kts` 就是在 project 级加 `google()` 的） |
+
+#### ★ 第八个坑（2026-10-07 实测）：**每个插件有自己的 `compileSdk`**，平台要装多个
+
+```
+Could not determine the dependencies of task ':flutter_secure_storage:compileReleaseJavaWithJavac'.
+> Failed to find Platform SDK with path: platforms;android-34
+```
+
+Android 构建里每个子项目（app + 每个插件）用**自己的** `compileSdk`，SDK 里缺哪个平台就报哪个。
+实测我们这套依赖需要的：
+
+| 项目 | compileSdk | 平台 zip（腾讯镜像，文件名以 Google 官方索引 `repository2-3.xml` 为准） |
+|---|---|---|
+| app（Flutter 3.47 默认） | 36 | `platform-36_r02.zip` |
+| `path_provider_android` **2.3.x**（会带进 `jni`） | 35 | `platform-35_r02.zip` |
+| `flutter_secure_storage`（**已移除**，装 34 现在不是必需） | 34 | **`platform-34-ext7_r03.zip`**（34 是 ext7 变体，没有 `platform-34_r03.zip`） |
+
+> **别被 `sqlite3_flutter_libs` 骗了**（我一开始就归错因）：drift 自己**不带** SQLite 引擎，
+> 但 `drift_flutter` 现在依赖的是 **`sqlite3_flutter_libs 0.6.0+eol`** —— 那是个**空壳**
+> （包目录里只有 `lib/` + pubspec，**没有 `android/`**，不参与 Android 构建）。
+> `drift_flutter` 的 pubspec 注释写得很直白："This dependency doesn't do anything, but we don't
+> want users depending on version 0.5.x because the sqlite3 package has been migrated to hooks."
+> 也就是说 sqlite3 引擎现在由 `package:sqlite3` 的 **build hooks** 负责（web 上仍是
+> `sqlite3.wasm`，见 §9.3）。
+
+**build-tools 同理**：插件自己用的 AGP（`flutter_secure_storage` 是 8.5.1）默认要
+**34.0.0**，所以 34/35/36 三套都装上（34 的 zip 名带连字符 `build-tools_r34-linux.zip`，
+35/36 是下划线 `build-tools_r35_linux.zip` —— 见第五个坑）。
+
+**怎么查下一回缺什么**（本机 pub-cache 里就能读，不用猜）：
+
+```bash
+for d in ~/.pub-cache/hosted/pub.dev/*; do
+  f="$d/android/build.gradle"; [ -f "$f" ] || f="$d/android/build.gradle.kts"; [ -f "$f" ] || continue
+  printf '%-46s %s\n' "$(basename "$d")" "$(grep -hoE 'compileSdk(Version)?[ =]+[0-9]+' "$f" | head -1)"
+done
+```
+
+#### ★ 第九个坑（2026-10-07 实测）：`path_provider_android` 2.3.x 带进 `jni` → 要真 NDK + CMake
+
+`path_provider_android` 从 **2.3.x** 起改用 JNI 实现，依赖 `jni` + `jni_flutter`，而 `jni`：
+
+```groovy
+// ~/.pub-cache/hosted/pub.dev/jni-1.0.3/android/build.gradle
+ndkVersion flutter.ndkVersion
+externalNativeBuild { cmake { … } }      // ← 自己编原生代码
+```
+
+→ 需要**真正的 NDK**（第八个坑那个 `source.properties` 标记糊不过 CMake ✗），
+大概率还要 SDK 里的 `cmake;3.22.1` 包 —— 两者都在 `dl.google.com` 上（不通）。
+
+**修法：把 `path_provider_android` 钉到不依赖 jni 的版本**（2.2.x 是纯 Kotlin 实现）：
+
+```yaml
+# pubspec.yaml
+dependency_overrides:
+  path_provider_android: 2.2.17      # 依赖只有 flutter + path_provider_platform_interface
+```
+
+我们只用 path_provider 拿一个可写目录（`lib/core/database/`），2.2.x 功能完全一样。
+拆掉这个 override 的前提：CI 环境能拿到真 NDK + cmake 包。
+
+> **NDK 标记仍要保留**：Flutter 的 `forceNdkDownload()` 对 **app 项目**照样会要 NDK
+> （第八个坑），所以 `$SDK/ndk/<版本>/source.properties` 那个标记不能删。
 
 #### 修法（二选一）
 
@@ -169,6 +520,126 @@ schtasks /Run /TN "forgejo-runner"
 
 5. 最后在仓库 **Settings → Actions → Variables** 里加变量 `WINDOWS_RUNNER=true`，`windows` job 才会被派发。
 
+## 2.4 ★ 让 CI 不再每次重下：宿主机准备一份、挂进容器
+
+**问题**：job 容器是临时的，每次跑都要重下 Flutter（~1GB）+ Android SDK（几个 zip）+
+Gradle/pub 依赖 —— 一个 android job 有好几分钟纯粹花在下载上。
+
+**做法**（用户 2026-10-07 定的）：宿主机装一份，runner 把它挂进 job 容器，
+工作流**优先用挂进来的、找不到才回退去下载**（所以在别的 runner / 本地跑也不会坏）。
+
+### ① 宿主机一次性准备（在 lingke 上，用你自己的账号，不要 sudo）
+
+```bash
+tools/prepare_ci_host.sh                  # 默认装到 ~/dev
+DEV_DIR=/srv/ci tools/prepare_ci_host.sh  # 或者换个目录
+```
+
+它做的事（幂等，只往 `$DEV_DIR` 写）：下 Flutter tar.xz → `flutter precache --linux --web --android`；
+从腾讯镜像取 4 个 SDK zip 解到规范目录；写好 AGP 需要的**许可文件**；
+建好 `gradle-home/` 与 `pub-cache/`。装完会打印各目录大小与下一步的挂载片段。
+
+### ② runner 侧挂进容器
+
+> ⚠️ 你们这套是 **dind**（docker-in-docker）：job 容器是 dind 里的 docker 创建的，
+> 所以**宿主目录必须先挂给 dind 容器**，job 容器再引用 dind 内的那个路径
+> （下面的 `/host-dev`）。
+
+```yaml
+# docker-compose.yml
+services:
+  docker-in-docker:
+    volumes:
+      - dind-storage:/var/lib/docker
+      - /home/warren/dev:/host-dev          # ← 新增：让 dind 看见它
+```
+
+```yaml
+# runner-config.yml（runner 的配置文件，daemon --config 指的那个）
+container:
+  valid_volumes:
+    - /host-dev/**                          # 允许 job 挂载的宿主目录白名单
+  options: "--volume /host-dev:/opt/dev"    # 给每个 job 容器都挂上
+```
+
+```bash
+docker compose up -d        # 让配置生效
+```
+
+### ③ 工作流里怎么用（已实现）
+
+- 顶层 env：`CI_HOST_DIR: /opt/dev`；
+- 「装 Flutter」步骤：`$CI_HOST_DIR/flutter` 有就直接用，否则回退下 tar.xz；
+- 「装 Android SDK」步骤：`$CI_HOST_DIR/android-sdk/platforms/android-36` 存在就直接用，
+  否则才从腾讯镜像下（而且**缺哪个补哪个**）；
+- 「缓存目录」步骤：能写 `$CI_HOST_DIR/{gradle-home,pub-cache}` 就把
+  `GRADLE_USER_HOME` / `PUB_CACHE` 指过去（Gradle 依赖与 pub 包也不再每次重下），
+  挂了只读或没挂就退回容器内缓存。
+
+### ④ JDK 也放进挂载目录（别用 `actions/setup-java`）
+
+`oci/node:20-bookworm` 里**没有 JDK**，而 Gradle/AGP 自己要一个 JVM —— 不装的话
+`flutter build apk` 第一步就报 `Unable to locate a Java Runtime`。
+原来用 `actions/setup-java@v4`：它每次从 `api.adoptium.net` → github releases 下
+**~190MB** Temurin（实测 **1m28s**，而且工具缓存落在临时容器里，下个 job 还得再下）。
+
+现在：工作流的 JDK 步骤**优先用 `$CI_HOST_DIR/jdk`**（`prepare_ci_host.sh` 会装好），
+没有才回退下载 —— 回退时用 Adoptium 的 **"latest" 重定向地址**，一次 `curl -fSL` 直接拿到
+tar.gz，不需要 `jq`/`python` 解析版本 JSON：
+
+```
+https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse
+```
+
+### ⑤ 两个注意点
+
+1. **挂载要可写**（不要加 `:ro`）：Flutter 运行时会写 `bin/cache`，Gradle/pub 缓存也要写。
+   代价是容器以 root 跑，**写进去的新文件属主是 root**；宿主机上想继续用这些目录时
+   `sudo chown -R "$USER" ~/dev` 一下即可。
+2. **Flutter 版本升级**：改工作流顶层 `FLUTTER_VERSION` 后，宿主机上删掉 `$DEV_DIR/flutter`
+   再跑一次 `prepare_ci_host.sh`（或直接在宿主机上 `git -C $DEV_DIR/flutter checkout <tag>`）。
+
+## 2.5 ★★ 结论：这套 runner 上"挂载宿主机目录"走不通 → 改成**烤镜像**
+
+**实测结论（2026-10-07）**：runner **v13.2.0 忽略 `container.options` 里的 `--volume`**。
+逐项排除过以后，卷依然进不了 job 容器：
+
+| 检查项 | 结果 |
+|---|---|
+| dind 里有 `/host-dev`（含 flutter/android-sdk/…） | ✅ |
+| runner 连的是哪个 daemon | ✅ dind（`DOCKER_HOST=tcp://docker-in-docker:2375`） |
+| `container.options` / `valid_volumes` 写法 | ✅ 正确（两个 `--volume` 都试过） |
+| `container:` 段重复？ | ✅ 只有 1 段（`grep -c '^container:'` = 1） |
+| runner 读的配置文件 | ✅ `/data/runner-config.yml`（`pwd` = `/data`），内容里有 options |
+| 改配置后重启、并且**运行发生在重启之后** | ✅ 仍然没有卷 |
+| job 容器里 `/opt` | ❌ 只有 `yarn-v1.22.22`；`/opt/dev`、`/opt/dev2` 连空目录都没建 |
+
+上游同症状：**forgejo/runner#425**「config container options are ignored (v6.0.0 regression)」
+（报告者说 `valid_volumes: ['**']`、`--mount`、`--volume` 都不行；修复进了 6.0.1，
+但在我们这套 **dind + label** 的用法下依然复现）。
+
+**所以改用镜像**——这是这台机器上唯一被证明可用的机制（job 镜像本来就是这么跑的）：
+
+```bash
+# 一次性：把 Flutter + Android SDK + JDK 烤进镜像（在 dind 里构建，镜像落在 dind 的持久卷上）
+mkdir -p ~/ci-image && cd ~/ci-image
+curl -fsSL -u <用户名> '<server>/…/raw/branch/3-ci-android-web/tools/ci/Dockerfile' -o Dockerfile
+curl -fsSL -u <用户名> '<server>/…/raw/branch/3-ci-android-web/tools/ci/build_ci_image.sh' -o build.sh
+bash build.sh
+
+# 然后让 runner 用这个镜像（改 compose 里 runner 的 --label，再重建容器）
+#   --label docker:docker://ws-scrcpy-ci:latest
+cd ~/forgejo-runner && sudo docker compose up -d
+```
+
+- 镜像里 Flutter/SDK/JDK 都放在 **`/opt/dev/...`**，正好是工作流探测的路径
+  （`/opt/dev/flutter`、`/opt/dev/android-sdk/platforms/android-36`、`/opt/dev/jdk`），
+  **所以工作流一行都不用改**：探测到就直接用，探测不到才回退下载（别的 runner 照样能跑）；
+- 镜像建在 **dind 里**（`docker exec -i <dind> docker build`），因为 job 容器由 dind 创建，
+  且 dind 的 `/var/lib/docker` 是持久卷 → 建一次就留住；
+- `tools/ci/Dockerfile` 里刻意避开了这台机器连不上的两处：`dl.google.com`（SDK 走腾讯镜像、
+  且不装 cmdline-tools）与 `jq`（不用第三方 action）。
+
 ## 3. 工作流做了什么
 
 | job | runner | 作用 | 产物 |
@@ -235,6 +706,8 @@ tools\build_release.cmd -SkipTests              # 跳过 analyze/test，赶紧�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | job 在 **Set up job** 阶段就失败，报 `failed to resolve reference "data.forgejo.org/oci/ubuntu:24.04": not found` | runner 的 `--label` 把 `ubuntu-latest` 映射到了**不存在的仓库** `oci/ubuntu`（那个 registry 只有 node/python/golang/alpine/debian） | 把那一行换成 `oci/node:20-bookworm` 后 `docker compose up -d`（见 §2.1）；或把工作流改成 `runs-on: docker` |
+| `verify`/`android`/`web` 报 `Cache Service Url not found`（或 cache 相关错误） | runner 没开缓存服务，而 `subosito/flutter-action` 的 `cache: true` 会调用 `@actions/cache` | 工作流里已设 `cache: false`（跑通优先）；想提速就在 compose 的 runner 配置里开 `cache.enabled: true` 再打开 |
+| `android` job 卡在装 SDK 或报下载失败 | `android-actions/setup-android` 要从 `dl.google.com` 取 cmdline-tools，`setup-java` 要访问 Adoptium | 在 runner 那台机器上 `curl -I https://dl.google.com` / `https://api.adoptium.net` 验通；不通就配代理或换自带 SDK 的镜像 |
 | `windows` job 一直"等待中" | 没有标签为 `windows` 的 runner（现有 `lingke` 是 Linux/Docker） | 注册 Windows runner（§2.2），或先关掉它（别设 `WINDOWS_RUNNER` 变量），Windows 包用 `tools\build_release.cmd -Platform windows` |
 | 下载 action 失败 / `uses:` 解析不了 | runner 的 `DEFAULT_ACTIONS_URL` 指不到 GitHub 或代理不通 | 在 runner 的 `config.yml` 里设 `[actions] DEFAULT_ACTIONS_URL = https://github.com`（或把 action 从内网镜像取） |
 | `[nuget_shim] ERROR: WebView2 / WIL packages are missing` | 干净 checkout 没跑取包那步 | 工作流已含 `prepare_windows_deps.ps1 -Online`；若仍报错，看它上面一条下载是否被网络拦了 |

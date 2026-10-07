@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/common/widget/async_state_view.dart';
-import 'package:ws_scrcpy_client/core/state/async_state.dart';
 import 'package:ws_scrcpy_client/core/util/message_of.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/dto/save_settings_dto.dart';
 import 'package:ws_scrcpy_client/feature/settings/data/model/vo/app_settings_vo.dart';
@@ -76,16 +75,7 @@ class _SettingsPageState extends State<SettingsPage> {
       );
       return;
     }
-    final state = widget.viewModel.state;
-    final passwordPersisted =
-        state is! AsyncSuccess<AppSettingsVo> || state.data.passwordPersisted;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          passwordPersisted ? '设置已保存' : '设置已保存；密码未能写入系统安全存储，本次会话有效，重启后需重填',
-        ),
-      ),
-    );
+    messenger.showSnackBar(const SnackBar(content: Text('设置已保存')));
   }
 
   Future<void> _openNewProfile(AppSettingsVo settings) async {

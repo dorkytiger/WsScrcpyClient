@@ -55,6 +55,18 @@ class $ConnectionProfilesTable extends ConnectionProfiles
     requiredDuringInsert: false,
     defaultValue: const Constant(''),
   );
+  static const VerificationMeta _passwordMeta = const VerificationMeta(
+    'password',
+  );
+  @override
+  late final GeneratedColumn<String> password = GeneratedColumn<String>(
+    'password',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
   static const VerificationMeta _keepScreenOnMeta = const VerificationMeta(
     'keepScreenOn',
   );
@@ -124,6 +136,7 @@ class $ConnectionProfilesTable extends ConnectionProfiles
     name,
     serverUrl,
     username,
+    password,
     keepScreenOn,
     lastUdid,
     isActive,
@@ -163,6 +176,12 @@ class $ConnectionProfilesTable extends ConnectionProfiles
       context.handle(
         _usernameMeta,
         username.isAcceptableOrUnknown(data['username']!, _usernameMeta),
+      );
+    }
+    if (data.containsKey('password')) {
+      context.handle(
+        _passwordMeta,
+        password.isAcceptableOrUnknown(data['password']!, _passwordMeta),
       );
     }
     if (data.containsKey('keep_screen_on')) {
@@ -227,6 +246,10 @@ class $ConnectionProfilesTable extends ConnectionProfiles
         DriftSqlType.string,
         data['${effectivePrefix}username'],
       )!,
+      password: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}password'],
+      )!,
       keepScreenOn: attachedDatabase.typeMapping.read(
         DriftSqlType.bool,
         data['${effectivePrefix}keep_screen_on'],
@@ -269,6 +292,9 @@ class ConnectionProfile extends DataClass
   /// Basic Auth 用户名；服务端未开鉴权时为空串。
   final String username;
 
+  /// Basic Auth 密码（**明文**，见类文档）。
+  final String password;
+
   /// 投流/操作期间是否保持屏幕常亮。
   final bool keepScreenOn;
 
@@ -284,6 +310,7 @@ class ConnectionProfile extends DataClass
     required this.name,
     required this.serverUrl,
     required this.username,
+    required this.password,
     required this.keepScreenOn,
     this.lastUdid,
     required this.isActive,
@@ -297,6 +324,7 @@ class ConnectionProfile extends DataClass
     map['name'] = Variable<String>(name);
     map['server_url'] = Variable<String>(serverUrl);
     map['username'] = Variable<String>(username);
+    map['password'] = Variable<String>(password);
     map['keep_screen_on'] = Variable<bool>(keepScreenOn);
     if (!nullToAbsent || lastUdid != null) {
       map['last_udid'] = Variable<String>(lastUdid);
@@ -313,6 +341,7 @@ class ConnectionProfile extends DataClass
       name: Value(name),
       serverUrl: Value(serverUrl),
       username: Value(username),
+      password: Value(password),
       keepScreenOn: Value(keepScreenOn),
       lastUdid: lastUdid == null && nullToAbsent
           ? const Value.absent()
@@ -333,6 +362,7 @@ class ConnectionProfile extends DataClass
       name: serializer.fromJson<String>(json['name']),
       serverUrl: serializer.fromJson<String>(json['serverUrl']),
       username: serializer.fromJson<String>(json['username']),
+      password: serializer.fromJson<String>(json['password']),
       keepScreenOn: serializer.fromJson<bool>(json['keepScreenOn']),
       lastUdid: serializer.fromJson<String?>(json['lastUdid']),
       isActive: serializer.fromJson<bool>(json['isActive']),
@@ -348,6 +378,7 @@ class ConnectionProfile extends DataClass
       'name': serializer.toJson<String>(name),
       'serverUrl': serializer.toJson<String>(serverUrl),
       'username': serializer.toJson<String>(username),
+      'password': serializer.toJson<String>(password),
       'keepScreenOn': serializer.toJson<bool>(keepScreenOn),
       'lastUdid': serializer.toJson<String?>(lastUdid),
       'isActive': serializer.toJson<bool>(isActive),
@@ -361,6 +392,7 @@ class ConnectionProfile extends DataClass
     String? name,
     String? serverUrl,
     String? username,
+    String? password,
     bool? keepScreenOn,
     Value<String?> lastUdid = const Value.absent(),
     bool? isActive,
@@ -371,6 +403,7 @@ class ConnectionProfile extends DataClass
     name: name ?? this.name,
     serverUrl: serverUrl ?? this.serverUrl,
     username: username ?? this.username,
+    password: password ?? this.password,
     keepScreenOn: keepScreenOn ?? this.keepScreenOn,
     lastUdid: lastUdid.present ? lastUdid.value : this.lastUdid,
     isActive: isActive ?? this.isActive,
@@ -383,6 +416,7 @@ class ConnectionProfile extends DataClass
       name: data.name.present ? data.name.value : this.name,
       serverUrl: data.serverUrl.present ? data.serverUrl.value : this.serverUrl,
       username: data.username.present ? data.username.value : this.username,
+      password: data.password.present ? data.password.value : this.password,
       keepScreenOn: data.keepScreenOn.present
           ? data.keepScreenOn.value
           : this.keepScreenOn,
@@ -400,6 +434,7 @@ class ConnectionProfile extends DataClass
           ..write('name: $name, ')
           ..write('serverUrl: $serverUrl, ')
           ..write('username: $username, ')
+          ..write('password: $password, ')
           ..write('keepScreenOn: $keepScreenOn, ')
           ..write('lastUdid: $lastUdid, ')
           ..write('isActive: $isActive, ')
@@ -415,6 +450,7 @@ class ConnectionProfile extends DataClass
     name,
     serverUrl,
     username,
+    password,
     keepScreenOn,
     lastUdid,
     isActive,
@@ -429,6 +465,7 @@ class ConnectionProfile extends DataClass
           other.name == this.name &&
           other.serverUrl == this.serverUrl &&
           other.username == this.username &&
+          other.password == this.password &&
           other.keepScreenOn == this.keepScreenOn &&
           other.lastUdid == this.lastUdid &&
           other.isActive == this.isActive &&
@@ -441,6 +478,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
   final Value<String> name;
   final Value<String> serverUrl;
   final Value<String> username;
+  final Value<String> password;
   final Value<bool> keepScreenOn;
   final Value<String?> lastUdid;
   final Value<bool> isActive;
@@ -451,6 +489,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
     this.name = const Value.absent(),
     this.serverUrl = const Value.absent(),
     this.username = const Value.absent(),
+    this.password = const Value.absent(),
     this.keepScreenOn = const Value.absent(),
     this.lastUdid = const Value.absent(),
     this.isActive = const Value.absent(),
@@ -462,6 +501,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
     this.name = const Value.absent(),
     required String serverUrl,
     this.username = const Value.absent(),
+    this.password = const Value.absent(),
     this.keepScreenOn = const Value.absent(),
     this.lastUdid = const Value.absent(),
     this.isActive = const Value.absent(),
@@ -475,6 +515,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
     Expression<String>? name,
     Expression<String>? serverUrl,
     Expression<String>? username,
+    Expression<String>? password,
     Expression<bool>? keepScreenOn,
     Expression<String>? lastUdid,
     Expression<bool>? isActive,
@@ -486,6 +527,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
       if (name != null) 'name': name,
       if (serverUrl != null) 'server_url': serverUrl,
       if (username != null) 'username': username,
+      if (password != null) 'password': password,
       if (keepScreenOn != null) 'keep_screen_on': keepScreenOn,
       if (lastUdid != null) 'last_udid': lastUdid,
       if (isActive != null) 'is_active': isActive,
@@ -499,6 +541,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
     Value<String>? name,
     Value<String>? serverUrl,
     Value<String>? username,
+    Value<String>? password,
     Value<bool>? keepScreenOn,
     Value<String?>? lastUdid,
     Value<bool>? isActive,
@@ -510,6 +553,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
       name: name ?? this.name,
       serverUrl: serverUrl ?? this.serverUrl,
       username: username ?? this.username,
+      password: password ?? this.password,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
       lastUdid: lastUdid ?? this.lastUdid,
       isActive: isActive ?? this.isActive,
@@ -532,6 +576,9 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
     }
     if (username.present) {
       map['username'] = Variable<String>(username.value);
+    }
+    if (password.present) {
+      map['password'] = Variable<String>(password.value);
     }
     if (keepScreenOn.present) {
       map['keep_screen_on'] = Variable<bool>(keepScreenOn.value);
@@ -558,6 +605,7 @@ class ConnectionProfilesCompanion extends UpdateCompanion<ConnectionProfile> {
           ..write('name: $name, ')
           ..write('serverUrl: $serverUrl, ')
           ..write('username: $username, ')
+          ..write('password: $password, ')
           ..write('keepScreenOn: $keepScreenOn, ')
           ..write('lastUdid: $lastUdid, ')
           ..write('isActive: $isActive, ')
@@ -905,6 +953,7 @@ typedef $$ConnectionProfilesTableCreateCompanionBuilder =
       Value<String> name,
       required String serverUrl,
       Value<String> username,
+      Value<String> password,
       Value<bool> keepScreenOn,
       Value<String?> lastUdid,
       Value<bool> isActive,
@@ -917,6 +966,7 @@ typedef $$ConnectionProfilesTableUpdateCompanionBuilder =
       Value<String> name,
       Value<String> serverUrl,
       Value<String> username,
+      Value<String> password,
       Value<bool> keepScreenOn,
       Value<String?> lastUdid,
       Value<bool> isActive,
@@ -950,6 +1000,11 @@ class $$ConnectionProfilesTableFilterComposer
 
   ColumnFilters<String> get username => $composableBuilder(
     column: $table.username,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get password => $composableBuilder(
+    column: $table.password,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1008,6 +1063,11 @@ class $$ConnectionProfilesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get password => $composableBuilder(
+    column: $table.password,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<bool> get keepScreenOn => $composableBuilder(
     column: $table.keepScreenOn,
     builder: (column) => ColumnOrderings(column),
@@ -1054,6 +1114,9 @@ class $$ConnectionProfilesTableAnnotationComposer
 
   GeneratedColumn<String> get username =>
       $composableBuilder(column: $table.username, builder: (column) => column);
+
+  GeneratedColumn<String> get password =>
+      $composableBuilder(column: $table.password, builder: (column) => column);
 
   GeneratedColumn<bool> get keepScreenOn => $composableBuilder(
     column: $table.keepScreenOn,
@@ -1117,6 +1180,7 @@ class $$ConnectionProfilesTableTableManager
                 Value<String> name = const Value.absent(),
                 Value<String> serverUrl = const Value.absent(),
                 Value<String> username = const Value.absent(),
+                Value<String> password = const Value.absent(),
                 Value<bool> keepScreenOn = const Value.absent(),
                 Value<String?> lastUdid = const Value.absent(),
                 Value<bool> isActive = const Value.absent(),
@@ -1127,6 +1191,7 @@ class $$ConnectionProfilesTableTableManager
                 name: name,
                 serverUrl: serverUrl,
                 username: username,
+                password: password,
                 keepScreenOn: keepScreenOn,
                 lastUdid: lastUdid,
                 isActive: isActive,
@@ -1139,6 +1204,7 @@ class $$ConnectionProfilesTableTableManager
                 Value<String> name = const Value.absent(),
                 required String serverUrl,
                 Value<String> username = const Value.absent(),
+                Value<String> password = const Value.absent(),
                 Value<bool> keepScreenOn = const Value.absent(),
                 Value<String?> lastUdid = const Value.absent(),
                 Value<bool> isActive = const Value.absent(),
@@ -1149,6 +1215,7 @@ class $$ConnectionProfilesTableTableManager
                 name: name,
                 serverUrl: serverUrl,
                 username: username,
+                password: password,
                 keepScreenOn: keepScreenOn,
                 lastUdid: lastUdid,
                 isActive: isActive,
