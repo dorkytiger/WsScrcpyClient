@@ -119,6 +119,7 @@ final class ScrcpyVideoSurfaceNativeView: NSView {
 #endif
 
 #if os(iOS)
+
 /// 交给 Flutter 的平台视图：只负责"把 layer 挂上/摘下"，
 /// 真正的像素走 `ScrcpyVideoSurfaceRegistry.enqueue`（不经过 Dart）。
 final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
@@ -127,13 +128,8 @@ final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
 
   init(frame: CGRect) {
     nativeView = ScrcpyVideoSurfaceNativeView(frame: frame)
-    #if os(macOS)
-    nativeView.wantsLayer = true
-    #endif
     displayLayer = nativeView.displayLayer
     super.init()
-
-    // 与现有渲染语义保持一致：contain（cover 模式 P1 再做进原生层，先回退纹理路径）
     displayLayer?.videoGravity = .resizeAspect
     if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.attach(displayLayer) }
   }
@@ -147,7 +143,6 @@ final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
   }
 }
 
-/// 平台视图工厂。视图类型名与 Dart 侧 `NativeVideoSurface.viewType` 必须一致。
 final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
   static let viewType = "ws_scrcpy/video_surface"
 
@@ -156,8 +151,28 @@ final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
     viewIdentifier viewId: Int64,
     arguments args: Any?
   ) -> FlutterPlatformView {
-    scrcpyVideoLog("原生视频层视图已创建：id=\(viewId)")
+    scrcpyVideoLog("原生视频层视图已创建（iOS）：id=\(viewId)")
     return ScrcpyVideoSurfacePlatformView(frame: frame)
   }
 }
+
+#elseif os(macOS)
+
+/// macOS 的平台视图工厂与 iOS **不是一个协议**：这里直接返回 `NSView`，
+/// 不需要 `FlutterPlatformView` 包装（那个类型在 FlutterMacOS 里根本不存在，
+/// 见 `FlutterPlatformViews.h`：`createWithViewIdentifier:arguments:` → `NSView`）。
+final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
+  static let viewType = "ws_scrcpy/video_surface"
+
+  func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
+    scrcpyVideoLog("原生视频层视图已创建（macOS）：id=\(viewId)")
+    let view = ScrcpyVideoSurfaceNativeView(frame: .zero)
+    view.wantsLayer = true
+    let displayLayer = view.layer as? AVSampleBufferDisplayLayer
+    displayLayer?.videoGravity = .resizeAspect
+    if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.attach(displayLayer) }
+    return view
+  }
+}
+
 #endif

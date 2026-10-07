@@ -25,10 +25,15 @@ class MainFlutterWindow: NSWindow {
     // 拿注册表的路径与 iOS 不同：macOS 走 `FlutterPluginRegistrar`
     // （`messenger` / `textures` 是**属性**，iOS 上是方法）。
     // 兜底用引擎本身——`FlutterEngine` 也实现了 `FlutterTextureRegistry`。
-    // 原生视频层（见 docs/native-video-surface-darwin.md）：**macOS 暂不接** ——
-    // Flutter 3.47 的 FlutterMacOS 不导出 `FlutterPlatformView`（实测
-    // `cannot find type 'FlutterPlatformView' in scope`），平台视图在这端用不了。
-    // macOS 继续走 FlutterTexture 路径；原生层换什么机制见该文档。
+    // 原生视频层（见 docs/native-video-surface-darwin.md）。
+    // ★ macOS 的 API 与 iOS **不同名**：工厂协议在 `FlutterPlatformViews.h` 里，
+    //   方法签名是 `createWithViewIdentifier:arguments:` → **直接返回 NSView**
+    //   （没有 iOS 那个 `FlutterPlatformView` 包装类型），注册入口是
+    //   registrar 的 `registerViewFactory(_:withId:)`。
+    flutterViewController
+      .registrar(forPlugin: "WsScrcpyVideoSurface")
+      // Swift 侧名字是 `register(_:withId:)`（ObjC 的 `registerViewFactory:` 在 Swift 里被重命名）
+      .register(ScrcpyVideoSurfaceFactory(), withId: ScrcpyVideoSurfaceFactory.viewType)
 
     let registrar = flutterViewController.registrar(forPlugin: "WsScrcpyVideo")
     videoChannel = ScrcpyVideoChannelHandler(

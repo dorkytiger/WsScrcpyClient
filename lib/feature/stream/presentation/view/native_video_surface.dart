@@ -23,14 +23,15 @@ class NativeVideoSurface extends StatelessWidget {
   /// （原生层另有"真机截图"验收，见 docs/native-video-surface-darwin.md §5。）
   static bool debugForceTexture = false;
 
-  /// 该平台有没有原生层实现。
+  /// 该平台有没有原生层实现（darwin 先行；Android/Windows 见方案 P2）。
   ///
-  /// **P0 只有 iOS**：macOS 那份 Flutter framework（Flutter 3.47 的 FlutterMacOS）
-  /// 并不导出 `FlutterPlatformView`，平台视图在 macOS 上用不了 —— 实测编译报
-  /// `cannot find type 'FlutterPlatformView' in scope`。macOS 何时上、换什么机制
-  /// （原生子视图挖洞 / 覆盖层）见 docs/native-video-surface-darwin.md。
+  /// ⚠️ 两端原生 API **不同名**：iOS 用 `FlutterPlatformView` 包装，
+  /// macOS 的工厂直接返回 `NSView`（`FlutterPlatformViews.h`）—— 细节见
+  /// docs/native-video-surface-darwin.md。
   static bool get isPlatformSupported =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.macOS);
 
   /// 是否走原生层。
   static bool get isEnabled => isPlatformSupported && !debugForceTexture;
@@ -40,7 +41,13 @@ class NativeVideoSurface extends StatelessWidget {
     // 非 iOS/macOS 不该走到这里（调用方先问 isEnabled），真走到就什么都不画。
     if (!isEnabled) return const SizedBox.shrink();
 
-    return UiKitView(
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return UiKitView(
+        viewType: viewType,
+        hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+      );
+    }
+    return AppKitView(
       viewType: viewType,
       hitTestBehavior: PlatformViewHitTestBehavior.transparent,
     );

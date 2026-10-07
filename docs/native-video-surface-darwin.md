@@ -34,6 +34,14 @@ VTDecompressionSession → CVPixelBuffer
 
 ### 3.1 Swift（`darwin/`，两端共用）
 
+### ★ 平台事实（实测，别再踩）
+
+| 事实 | 证据 / 影响 |
+|---|---|
+| iOS 用 `FlutterPlatformView` 包装，`func view()` **必须返回 `UIView`** | 返回具体子类会报 `does not conform to protocol 'FlutterPlatformView'`（协议见证不允许协变返回） |
+| **macOS 是完全另一套 API**：`FlutterPlatformViews.h` 里 `FlutterPlatformViewFactory` 的 `createWithViewIdentifier:arguments:` **直接返回 `NSView`**，没有 `FlutterPlatformView` 这个类型 | 我一开始照 iOS 写，macOS 报 `cannot find type 'FlutterPlatformView' in scope`。Swift 侧注册入口是 registrar 的 `register(_:withId:)`（ObjC `registerViewFactory:` 被重命名） |
+| 两端都注册同一个视图类型名 `ws_scrcpy/video_surface` | Dart 侧一个 `NativeVideoSurface` 两端通用 |
+
 | 文件 | 改什么 |
 |---|---|
 | `ScrcpyVideoDecoder.swift` | 增加"**显示目标**"抽象：`TextureSink`（现有，保留为兜底）与 `LayerSink`（新，持有 `AVSampleBufferDisplayLayer`）。解码出 `CVPixelBuffer` 后：走 LayerSink 时**不做额外拷贝**，直接 `enqueue`；走 TextureSink 时保持原逻辑 |
