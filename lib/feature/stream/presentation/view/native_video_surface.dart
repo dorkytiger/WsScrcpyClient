@@ -22,13 +22,9 @@ class NativeVideoSurface extends StatelessWidget {
   /// 测试钩子：强制走 FlutterTexture 路径（widget 测试断言的是那条路的几何）。
   static bool debugForceTexture = false;
 
-  /// 是否允许原生层接管。**默认 false**。
-  ///
-  /// 为什么默认关（2026-10-07 macOS 实测）：原生层"接上了、enqueue 成功、layer status=rendering"
-  /// **不等于"画面真的显示出来"** —— 实测三者都正常但屏幕全黑。当时我按"enqueue 成功"就切断了
-  /// 纹理路径，于是黑屏没有任何兜底。**在没有可靠的"真的显示了"判据之前，原生层必须是显式开**：
-  /// 想试就把它设成 true（配合 docs/native-video-surface-darwin.md 里的待查项）。
-  static bool debugForceEnabled = false;
+  /// 原生层开关。**默认开**（用户 2026-10-07 定调：不要纹理兜底 ——
+  /// "能实现就是能稳定跑，不能实现就是不能实现"）。关掉它只会用于单元测试/对照实验。
+  static bool debugForceEnabled = true;
 
   /// 该平台有没有原生层实现（darwin 先行；Android/Windows 见方案 P2）。
   ///

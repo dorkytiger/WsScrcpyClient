@@ -1,7 +1,6 @@
 import AVFoundation
 
-// macOS 上 Flutter 的模块名是 `FlutterMacOS`，iOS 上才是 `Flutter` —— 与
-// ScrcpyVideoChannelHandler.swift 保持同一种写法（这里是两端共用的一份文件）。
+// macOS 上 Flutter 的模块名是 `FlutterMacOS`，iOS 上才是 `Flutter`（两端共用这一份文件）。
 #if os(iOS)
 import Flutter
 #elseif os(macOS)
@@ -17,30 +16,19 @@ import AppKit
 /// 原生视频层（macOS / iOS 共用）：把解码出的 `CVPixelBuffer` **直接**送进
 /// `AVSampleBufferDisplayLayer`，绕开 Flutter 的合成管线。
 ///
-/// 为什么这么做 / 收益与风险见 `docs/native-video-surface-darwin.md`：
-/// 现在这条链是 `解码器 → 拷进 FlutterTexture → 引擎合成 → 提交`，
-/// 换成 `解码器 → AVSampleBufferDisplayLayer.enqueue()` 后少一次拷贝 + 一次合成排队（10–25ms）。
-///
-/// **两条路都留着**：平台视图没挂上（或失败）时，通道处理器继续走原来的 FlutterTexture 路径，
-/// 所以任何异常都只是"回到旧行为"，不会黑屏。
+/// 设计原则（用户 2026-10-07 明确要求）：**没有纹理兜底** —— 挂着原生层就走原生层，
+/// "能实现就是能稳定跑，不能实现就是不能实现"。这里只做一件事：把帧用**最标准的方式**送进 layer。
+/// 背景与实测记录见 `docs/native-video-surface-darwin.md`。
 final class ScrcpyVideoSurfaceRegistry {
   static let shared = ScrcpyVideoSurfaceRegistry()
 
   private var layer: AVSampleBufferDisplayLayer?
   private let lock = NSLock()
 
-  /// 已经成功 enqueue 的帧数；配合 `status == .rendering` 用来判断"原生层真的在工作"。
-  private var enqueuedFrames = 0
+  /// 自增序号：用来造**递增的有效 PTS**（PTS 为 invalid 时，若 DisplayImmediately
+  /// 那个 attachment 没被 layer 采纳，layer 会永远不出图 —— 实测全黑）。
+  private var frameIndex: Int64 = 0
   private var loggedFirstFrame = false
-
-  /// 原生层是否已确认在消费帧。**没确认之前纹理路径继续跑** ——
-  /// 否则一旦 layer 因为任何原因不显示（比如视图尺寸为 0），画面就直接黑了（实测踩过）。
-  var isLive: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let layer else { return false }
-    return enqueuedFrames >= 3 && layer.status == .rendering
-  }
 
   private init() {}
 
@@ -48,19 +36,17 @@ final class ScrcpyVideoSurfaceRegistry {
     lock.lock()
     self.layer = layer
     lock.unlock()
-    scrcpyVideoLog("原生视频层已接入：解码结果将直接送 layer（纹理路径让位）")
+    scrcpyVideoLog("原生视频层已接入：解码结果直接送 layer")
   }
 
   func detach(_ layer: AVSampleBufferDisplayLayer) {
     lock.lock()
     if self.layer === layer { self.layer = nil }
     lock.unlock()
-    scrcpyVideoLog("原生视频层已断开：回退 FlutterTexture 路径")
+    scrcpyVideoLog("原生视频层已断开")
   }
 
-  /// 有原生层就 enqueue 并返回 `true`（调用方据此**跳过**纹理拷贝）。
-  ///
-  /// 积压策略与解码器一致：**跟不上就丢这一帧，绝不排队** —— 排队只会把延迟越堆越大。
+  /// 把解码帧送进原生层；挂着 layer 返回 `true`（调用方不再走纹理）。
   @discardableResult
   func enqueue(_ pixelBuffer: CVPixelBuffer) -> Bool {
     lock.lock()
@@ -69,10 +55,10 @@ final class ScrcpyVideoSurfaceRegistry {
     guard let layer else { return false }
 
     if layer.status == .failed {
-      scrcpyVideoLog("原生视频层状态异常，flush 后重试")
+      scrcpyVideoLog("原生层状态异常，flush 重来")
       layer.flush()
     }
-    guard layer.isReadyForMoreMediaData else { return true }
+    guard layer.isReadyForMoreMediaData else { return true }  // 跟不上就丢这帧，不排队
 
     var format: CMFormatDescription?
     CMVideoFormatDescriptionCreateForImageBuffer(
@@ -81,9 +67,15 @@ final class ScrcpyVideoSurfaceRegistry {
       formatDescriptionOut: &format)
     guard let format else { return true }
 
-    // presentationTimeStamp = .invalid + DisplayImmediately：不等排程，立刻显示（低延迟的关键）
+    lock.lock()
+    frameIndex += 1
+    let index = frameIndex
+    lock.unlock()
+
     var timing = CMSampleTimingInfo(
-      duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid)
+      duration: CMTime(value: 1, timescale: 60),
+      presentationTimeStamp: CMTime(value: index, timescale: 60),
+      decodeTimeStamp: .invalid)
     var sample: CMSampleBuffer?
     CMSampleBufferCreateReadyWithImageBuffer(
       allocator: kCFAllocatorDefault,
@@ -93,31 +85,25 @@ final class ScrcpyVideoSurfaceRegistry {
       sampleBufferOut: &sample)
     guard let sample else { return true }
 
-    if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true) {
-      let count = CFArrayGetCount(attachments)
-      if count > 0 {
-        let raw = CFArrayGetValueAtIndex(attachments, 0)
-        let dict = unsafeBitCast(raw, to: CFMutableDictionary.self)
-        CMSetAttachment(
-          dict,
-          key: kCMSampleAttachmentKey_DisplayImmediately,
-          value: kCFBooleanTrue,
-          attachmentMode: kCMAttachmentMode_ShouldPropagate)
-      }
-    }
+    // `CMSampleBuffer` 本身符合 `CMAttachmentBearer` → 直接 CMSetAttachment。
+    // （不要走 unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0)) 那条路：很可能
+    //   根本没写到该写的地方 —— 这是上一版全黑的可疑点之一。）
+    CMSetAttachment(
+      sample,
+      key: kCMSampleAttachmentKey_DisplayImmediately,
+      value: kCFBooleanTrue,
+      attachmentMode: kCMAttachmentMode_ShouldPropagate)  // CMMAttachmentMode 是 UInt32 别名，没有 Swift 枚举成员
 
     layer.enqueue(sample)
+
     lock.lock()
-    enqueuedFrames += 1
     let first = !loggedFirstFrame
     if first { loggedFirstFrame = true }
     lock.unlock()
     if first {
-      // 一行把"layer 到底有没有条件显示"讲清楚：尺寸为 0 / 没进 window 都会是黑的
-      // 注意：`window` 是 NSView/UIView 的属性，CALayer 上没有（写 `.window` 会编译失败）
       scrcpyVideoLog(
-        "原生层首帧：layer bounds=\(layer.bounds.size) status=\(layer.status.rawValue) "
-          + "ready=\(layer.isReadyForMoreMediaData)")
+        "原生层首帧：bounds=\(layer.bounds.size) status=\(layer.status.rawValue) "
+          + "ready=\(layer.isReadyForMoreMediaData) pts=\(timing.presentationTimeStamp.seconds)")
     }
     return true
   }
@@ -125,28 +111,14 @@ final class ScrcpyVideoSurfaceRegistry {
 
 #if os(iOS)
 
-/// iOS 侧的原生显示视图：自带 layer 就是 `AVSampleBufferDisplayLayer`。
+/// iOS：视图自带的 layer 就是 `AVSampleBufferDisplayLayer`。
 final class ScrcpyVideoSurfaceNativeView: UIView {
   override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-
   var displayLayer: AVSampleBufferDisplayLayer? { layer as? AVSampleBufferDisplayLayer }
 }
 
-#elseif os(macOS)
-
-/// macOS 侧的原生显示视图：backing layer 换成 `AVSampleBufferDisplayLayer`。
-final class ScrcpyVideoSurfaceNativeView: NSView {
-  override func makeBackingLayer() -> CALayer { AVSampleBufferDisplayLayer() }
-
-  var displayLayer: AVSampleBufferDisplayLayer? { layer as? AVSampleBufferDisplayLayer }
-}
-
-#endif
-
-#if os(iOS)
-
-/// 交给 Flutter 的平台视图：只负责"把 layer 挂上/摘下"，
-/// 真正的像素走 `ScrcpyVideoSurfaceRegistry.enqueue`（不经过 Dart）。
+/// iOS 的平台视图包装：`FlutterPlatformView` 要求 `view()` 返回 **UIView**
+///（返回具体子类会报协议不满足：Swift 的协议见证不允许协变返回）。
 final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
   private let nativeView: ScrcpyVideoSurfaceNativeView
   private let displayLayer: AVSampleBufferDisplayLayer?
@@ -159,8 +131,6 @@ final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
     if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.attach(displayLayer) }
   }
 
-  // ★ 必须返回 `UIView` 而不是具体子类：Swift 的协议见证不允许协变返回类型，
-  //   写成子类会报 `does not conform to protocol 'FlutterPlatformView'`（实测）。
   func view() -> UIView { nativeView }
 
   deinit {
@@ -183,9 +153,15 @@ final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
 
 #elseif os(macOS)
 
-/// macOS 的平台视图工厂与 iOS **不是一个协议**：这里直接返回 `NSView`，
-/// 不需要 `FlutterPlatformView` 包装（那个类型在 FlutterMacOS 里根本不存在，
-/// 见 `FlutterPlatformViews.h`：`createWithViewIdentifier:arguments:` → `NSView`）。
+/// macOS：把 backing layer 换成 `AVSampleBufferDisplayLayer`。
+final class ScrcpyVideoSurfaceNativeView: NSView {
+  override func makeBackingLayer() -> CALayer { AVSampleBufferDisplayLayer() }
+  var displayLayer: AVSampleBufferDisplayLayer? { layer as? AVSampleBufferDisplayLayer }
+}
+
+/// macOS 的平台视图工厂与 iOS **不是同一个协议**（`FlutterPlatformViews.h`）：
+/// `createWithViewIdentifier:arguments:`（Swift: `create(withViewIdentifier:arguments:)`）
+/// **直接返回 `NSView`** —— 没有 iOS 那个 `FlutterPlatformView` 包装类型。
 final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
   static let viewType = "ws_scrcpy/video_surface"
 
@@ -196,6 +172,15 @@ final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
     let displayLayer = view.layer as? AVSampleBufferDisplayLayer
     displayLayer?.videoGravity = .resizeAspect
     if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.attach(displayLayer) }
+
+    // "layer 明明在 rendering 却看不见" 的第一嫌疑是层级/位置：把事实打出来。
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak view] in
+      guard let view else { return }
+      scrcpyVideoLog(
+        "原生层视图：frame=\(view.frame) hidden=\(view.isHidden) "
+          + "superview=\(view.superview != nil) window=\(view.window != nil) "
+          + "alpha=\(view.alphaValue) layerBounds=\(view.layer?.bounds.size ?? .zero)")
+    }
     return view
   }
 }
