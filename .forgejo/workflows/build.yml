@@ -81,6 +81,18 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
+      - name: 环境诊断（排查挂载用；失败不拦）
+        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
+        continue-on-error: true
+        run: |
+          echo "CI_HOST_DIR=$CI_HOST_DIR"
+          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
+          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
+          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
+          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
+          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          echo "== hostname ==" ; hostname
+
       - name: 基础工具（镜像里未必带 xz/zip/unzip）
         run: |
           set -e
@@ -165,6 +177,18 @@ jobs:
     steps:
       - name: 检出
         uses: actions/checkout@v4
+
+      - name: 环境诊断（排查挂载用；失败不拦）
+        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
+        continue-on-error: true
+        run: |
+          echo "CI_HOST_DIR=$CI_HOST_DIR"
+          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
+          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
+          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
+          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
+          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          echo "== hostname ==" ; hostname
 
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
@@ -378,6 +402,18 @@ jobs:
     steps:
       - name: 检出
         uses: actions/checkout@v4
+
+      - name: 环境诊断（排查挂载用；失败不拦）
+        # 只打印事实：job 容器里到底能看到什么。别靠猜（见 docs/ci.md §2.4）
+        continue-on-error: true
+        run: |
+          echo "CI_HOST_DIR=$CI_HOST_DIR"
+          echo "== ls /opt =="        ; ls -la /opt        2>&1 | head -10
+          echo "== ls /host-dev =="   ; ls -la /host-dev   2>&1 | head -10
+          echo "== ls CI_HOST_DIR ==" ; ls -la "$CI_HOST_DIR" 2>&1 | head -10
+          echo "== mountinfo（/opt 或 /host-dev 或 */dev 相关的行）=="
+          grep -E "/(opt|host-dev|home/[^/ ]*/dev)" /proc/self/mountinfo 2>/dev/null | head -10
+          echo "== hostname ==" ; hostname
 
       - name: 基础工具（镜像里未必带 zip/unzip/xz）
         # job 容器用的是 node:*-bookworm 这类镜像，别假设它带这些：
