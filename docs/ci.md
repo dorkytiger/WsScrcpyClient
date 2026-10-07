@@ -309,6 +309,70 @@ schtasks /Run /TN "forgejo-runner"
 
 5. 最后在仓库 **Settings → Actions → Variables** 里加变量 `WINDOWS_RUNNER=true`，`windows` job 才会被派发。
 
+## 2.4 ★ 让 CI 不再每次重下：宿主机准备一份、挂进容器
+
+**问题**：job 容器是临时的，每次跑都要重下 Flutter（~1GB）+ Android SDK（几个 zip）+
+Gradle/pub 依赖 —— 一个 android job 有好几分钟纯粹花在下载上。
+
+**做法**（用户 2026-10-07 定的）：宿主机装一份，runner 把它挂进 job 容器，
+工作流**优先用挂进来的、找不到才回退去下载**（所以在别的 runner / 本地跑也不会坏）。
+
+### ① 宿主机一次性准备（在 lingke 上，用你自己的账号，不要 sudo）
+
+```bash
+tools/prepare_ci_host.sh                  # 默认装到 ~/dev
+DEV_DIR=/srv/ci tools/prepare_ci_host.sh  # 或者换个目录
+```
+
+它做的事（幂等，只往 `$DEV_DIR` 写）：下 Flutter tar.xz → `flutter precache --linux --web --android`；
+从腾讯镜像取 4 个 SDK zip 解到规范目录；写好 AGP 需要的**许可文件**；
+建好 `gradle-home/` 与 `pub-cache/`。装完会打印各目录大小与下一步的挂载片段。
+
+### ② runner 侧挂进容器
+
+> ⚠️ 你们这套是 **dind**（docker-in-docker）：job 容器是 dind 里的 docker 创建的，
+> 所以**宿主目录必须先挂给 dind 容器**，job 容器再引用 dind 内的那个路径
+> （下面的 `/host-dev`）。
+
+```yaml
+# docker-compose.yml
+services:
+  docker-in-docker:
+    volumes:
+      - dind-storage:/var/lib/docker
+      - /home/warren/dev:/host-dev          # ← 新增：让 dind 看见它
+```
+
+```yaml
+# runner-config.yml（runner 的配置文件，daemon --config 指的那个）
+container:
+  valid_volumes:
+    - /host-dev/**                          # 允许 job 挂载的宿主目录白名单
+  options: "--volume /host-dev:/opt/dev"    # 给每个 job 容器都挂上
+```
+
+```bash
+docker compose up -d        # 让配置生效
+```
+
+### ③ 工作流里怎么用（已实现）
+
+- 顶层 env：`CI_HOST_DIR: /opt/dev`；
+- 「装 Flutter」步骤：`$CI_HOST_DIR/flutter` 有就直接用，否则回退下 tar.xz；
+- 「装 Android SDK」步骤：`$CI_HOST_DIR/android-sdk/platforms/android-36` 存在就直接用，
+  否则才从腾讯镜像下（而且**缺哪个补哪个**）；
+- 「缓存目录」步骤：能写 `$CI_HOST_DIR/{gradle-home,pub-cache}` 就把
+  `GRADLE_USER_HOME` / `PUB_CACHE` 指过去（Gradle 依赖与 pub 包也不再每次重下），
+  挂了只读或没挂就退回容器内缓存。
+
+### ④ 两个注意点
+
+1. **挂载要可写**（不要加 `:ro`）：Flutter 运行时会写 `bin/cache`，Gradle/pub 缓存也要写。
+   代价是容器以 root 跑，**写进去的新文件属主是 root**；宿主机上想继续用这些目录时
+   `sudo chown -R "$USER" ~/dev` 一下即可。
+2. **Flutter 版本升级**：改工作流顶层 `FLUTTER_VERSION` 后，宿主机上删掉 `$DEV_DIR/flutter`
+   再跑一次 `prepare_ci_host.sh`（或直接在宿主机上 `git -C $DEV_DIR/flutter checkout <tag>`）。
+
 ## 3. 工作流做了什么
 
 | job | runner | 作用 | 产物 |

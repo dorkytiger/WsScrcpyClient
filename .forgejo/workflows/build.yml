@@ -61,6 +61,11 @@ concurrency:
 env:
   # 与 AGENTS.md §2 对齐；升级 Flutter 时改这里 + pubspec 的 sdk 约束。
   FLUTTER_VERSION: '3.47.1'
+  # ★ 宿主机挂进来的 CI 资源目录（Flutter / Android SDK / Gradle 与 pub 缓存）。
+  #   由 tools/prepare_ci_host.sh 一次性准备、runner 用 container.options 挂进 job 容器
+  #   （见 docs/ci.md §2.4）。**挂上了就一个字节都不用下**；没挂就自动回退到下载，
+  #   所以在别的 runner / 本地跑也不会坏。
+  CI_HOST_DIR: /opt/dev
 
 jobs:
   # ── 1. 静态检查 + 单测（与平台无关，跑在 Linux 上最快）────────────────────
@@ -83,15 +88,32 @@ jobs:
             apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
           fi
 
-      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
-        # 为什么不用 `subosito/flutter-action`：
-        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
-        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
-        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
+      - name: 缓存目录（挂载可用时，Gradle/pub 依赖也不用每次重下）
         run: |
           set -e
-          FLUTTER_HOME="$HOME/flutter"
-          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+          if mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
+            echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
+            echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
+            echo "缓存走挂载目录：$CI_HOST_DIR"
+          else
+            echo "没有可写的 $CI_HOST_DIR（未挂载？）→ 缓存留在容器内，每次重下"
+          fi
+
+      - name: 装 Flutter（优先用宿主机挂进来的，没有才下载）
+        # 宿主机准备见 tools/prepare_ci_host.sh：$CI_HOST_DIR/flutter 存在就直接用
+        # （省掉每个 job 重下 ~1GB）；不存在才回退到官方 tar.xz。
+        run: |
+          set -e
+          FLUTTER_HOME=""
+          for candidate in "$CI_HOST_DIR/flutter" "$HOME/flutter"; do
+            if [ -x "$candidate/bin/flutter" ]; then
+              FLUTTER_HOME="$candidate"
+              echo "用已存在的 Flutter：$candidate"
+              break
+            fi
+          done
+          if [ -z "$FLUTTER_HOME" ]; then
+            FLUTTER_HOME="$HOME/flutter"
             URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
             echo "下载 $URL"
             curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
@@ -151,15 +173,32 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
-        # 为什么不用 `subosito/flutter-action`：
-        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
-        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
-        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
+      - name: 缓存目录（挂载可用时，Gradle/pub 依赖也不用每次重下）
         run: |
           set -e
-          FLUTTER_HOME="$HOME/flutter"
-          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+          if mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
+            echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
+            echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
+            echo "缓存走挂载目录：$CI_HOST_DIR"
+          else
+            echo "没有可写的 $CI_HOST_DIR（未挂载？）→ 缓存留在容器内，每次重下"
+          fi
+
+      - name: 装 Flutter（优先用宿主机挂进来的，没有才下载）
+        # 宿主机准备见 tools/prepare_ci_host.sh：$CI_HOST_DIR/flutter 存在就直接用
+        # （省掉每个 job 重下 ~1GB）；不存在才回退到官方 tar.xz。
+        run: |
+          set -e
+          FLUTTER_HOME=""
+          for candidate in "$CI_HOST_DIR/flutter" "$HOME/flutter"; do
+            if [ -x "$candidate/bin/flutter" ]; then
+              FLUTTER_HOME="$candidate"
+              echo "用已存在的 Flutter：$candidate"
+              break
+            fi
+          done
+          if [ -z "$FLUTTER_HOME" ]; then
+            FLUTTER_HOME="$HOME/flutter"
             URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
             echo "下载 $URL"
             curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
@@ -183,7 +222,12 @@ jobs:
         # 版本对应：compileSdk 36（Flutter 3.47 默认）+ build-tools 36.0.0。
         run: |
           set -e
-          SDK="$HOME/android-sdk"
+          if [ -d "$CI_HOST_DIR/android-sdk/platforms/android-36" ]; then
+            SDK="$CI_HOST_DIR/android-sdk"
+            echo "用已存在的 Android SDK：$SDK"
+          else
+            SDK="$HOME/android-sdk"
+          fi
           BASE="https://mirrors.cloud.tencent.com/AndroidSDK"
           mkdir -p "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"
 
@@ -194,13 +238,15 @@ jobs:
             mv "$(find /tmp/unpack -mindepth 1 -maxdepth 1 | head -1)" "$1"
           }
 
-          fetch platform-36_r02.zip        && unpack_to "$SDK/platforms/android-36"
-          fetch build-tools_r36_linux.zip  && unpack_to "$SDK/build-tools/36.0.0"
-          fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"
-          fetch commandlinetools-linux-16111833_latest.zip
-          rm -rf /tmp/unpack && mkdir -p /tmp/unpack "$SDK/cmdline-tools"
-          unzip -q /tmp/pkg.zip -d /tmp/unpack
-          mv /tmp/unpack/cmdline-tools "$SDK/cmdline-tools/latest"
+          [ -d "$SDK/platforms/android-36" ]          || { fetch platform-36_r02.zip && unpack_to "$SDK/platforms/android-36"; }
+          [ -d "$SDK/build-tools/36.0.0" ]            || { fetch build-tools_r36_linux.zip && unpack_to "$SDK/build-tools/36.0.0"; }
+          [ -d "$SDK/platform-tools" ]                || { fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"; }
+          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            fetch commandlinetools-linux-16111833_latest.zip
+            rm -rf /tmp/unpack && mkdir -p /tmp/unpack "$SDK/cmdline-tools"
+            unzip -q /tmp/pkg.zip -d /tmp/unpack
+            mv /tmp/unpack/cmdline-tools "$SDK/cmdline-tools/latest"
+          fi
 
           # 许可文件：不写的话 AGP 认为许可没接受，直接拒绝构建
           printf '%s\n' \
@@ -308,15 +354,32 @@ jobs:
             apt-get update -qq && apt-get install -y -qq xz-utils zip unzip
           fi
 
-      - name: 装 Flutter（自己下官方 tar.xz，不用第三方 action）
-        # 为什么不用 `subosito/flutter-action`：
-        #   ① 它要求容器里装有 **`jq`**（实测报 `jq not found`），而 oci/node:20-bookworm 没有；
-        #   ② 它是第三方 action，还得从 github.com 取（runner 的镜像只镜像 actions/*）。
-        # 自己下官方 tar.xz 只需要 curl + tar + xz（基础镜像自带），依赖面最小、也最好排查。
+      - name: 缓存目录（挂载可用时，Gradle/pub 依赖也不用每次重下）
         run: |
           set -e
-          FLUTTER_HOME="$HOME/flutter"
-          if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+          if mkdir -p "$CI_HOST_DIR/gradle-home" "$CI_HOST_DIR/pub-cache" 2>/dev/null; then
+            echo "GRADLE_USER_HOME=$CI_HOST_DIR/gradle-home" >> "$GITHUB_ENV"
+            echo "PUB_CACHE=$CI_HOST_DIR/pub-cache" >> "$GITHUB_ENV"
+            echo "缓存走挂载目录：$CI_HOST_DIR"
+          else
+            echo "没有可写的 $CI_HOST_DIR（未挂载？）→ 缓存留在容器内，每次重下"
+          fi
+
+      - name: 装 Flutter（优先用宿主机挂进来的，没有才下载）
+        # 宿主机准备见 tools/prepare_ci_host.sh：$CI_HOST_DIR/flutter 存在就直接用
+        # （省掉每个 job 重下 ~1GB）；不存在才回退到官方 tar.xz。
+        run: |
+          set -e
+          FLUTTER_HOME=""
+          for candidate in "$CI_HOST_DIR/flutter" "$HOME/flutter"; do
+            if [ -x "$candidate/bin/flutter" ]; then
+              FLUTTER_HOME="$candidate"
+              echo "用已存在的 Flutter：$candidate"
+              break
+            fi
+          done
+          if [ -z "$FLUTTER_HOME" ]; then
+            FLUTTER_HOME="$HOME/flutter"
             URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
             echo "下载 $URL"
             curl -fSL --retry 3 --retry-delay 2 -o /tmp/flutter.tar.xz "$URL"
