@@ -1,5 +1,12 @@
 import AVFoundation
+
+// macOS 上 Flutter 的模块名是 `FlutterMacOS`，iOS 上才是 `Flutter` —— 与
+// ScrcpyVideoChannelHandler.swift 保持同一种写法（这里是两端共用的一份文件）。
+#if os(iOS)
 import Flutter
+#elseif os(macOS)
+import FlutterMacOS
+#endif
 
 #if os(iOS)
 import UIKit
@@ -111,6 +118,7 @@ final class ScrcpyVideoSurfaceNativeView: NSView {
 
 #endif
 
+#if os(iOS)
 /// 交给 Flutter 的平台视图：只负责"把 layer 挂上/摘下"，
 /// 真正的像素走 `ScrcpyVideoSurfaceRegistry.enqueue`（不经过 Dart）。
 final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
@@ -130,7 +138,9 @@ final class ScrcpyVideoSurfacePlatformView: NSObject, FlutterPlatformView {
     if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.attach(displayLayer) }
   }
 
-  func view() -> ScrcpyVideoSurfaceNativeView { nativeView }
+  // ★ 必须返回 `UIView` 而不是具体子类：Swift 的协议见证不允许协变返回类型，
+  //   写成子类会报 `does not conform to protocol 'FlutterPlatformView'`（实测）。
+  func view() -> UIView { nativeView }
 
   deinit {
     if let displayLayer { ScrcpyVideoSurfaceRegistry.shared.detach(displayLayer) }
@@ -150,3 +160,4 @@ final class ScrcpyVideoSurfaceFactory: NSObject, FlutterPlatformViewFactory {
     return ScrcpyVideoSurfacePlatformView(frame: frame)
   }
 }
+#endif
