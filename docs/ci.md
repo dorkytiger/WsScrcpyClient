@@ -368,6 +368,35 @@ Error resolving plugin [id: 'dev.flutter.flutter-plugin-loader', version: '1.0.0
 | project 的 `buildscript.repositories` | ✅ 总是改（buildscript 解析不受该模式管辖 —— 这正是修复 `:flutter_secure_storage` 的那条路） |
 | project 的 `repositories` | ⚠️ **只在该 build 不是 `FAIL_ON_PROJECT_REPOS` 时改**（我们的 app build 是默认的 `PREFER_PROJECT`；Flutter 的 `resolve_dependencies.gradle.kts` 就是在 project 级加 `google()` 的） |
 
+#### ★ 第八个坑（2026-10-07 实测）：**每个插件有自己的 `compileSdk`**，平台要装多个
+
+```
+Could not determine the dependencies of task ':flutter_secure_storage:compileReleaseJavaWithJavac'.
+> Failed to find Platform SDK with path: platforms;android-34
+```
+
+Android 构建里每个子项目（app + 每个插件）用**自己的** `compileSdk`，SDK 里缺哪个平台就报哪个。
+实测我们这套依赖需要的：
+
+| 项目 | compileSdk | 平台 zip（腾讯镜像，文件名以 Google 官方索引 `repository2-3.xml` 为准） |
+|---|---|---|
+| app（Flutter 3.47 默认） | 36 | `platform-36_r02.zip` |
+| `sqlite3_flutter_libs`（drift 依赖）/ `jni` | 35 | `platform-35_r02.zip` |
+| `flutter_secure_storage` | 34 | **`platform-34-ext7_r03.zip`**（34 是 ext7 变体，没有 `platform-34_r03.zip`） |
+
+**build-tools 同理**：插件自己用的 AGP（`flutter_secure_storage` 是 8.5.1）默认要
+**34.0.0**，所以 34/35/36 三套都装上（34 的 zip 名带连字符 `build-tools_r34-linux.zip`，
+35/36 是下划线 `build-tools_r35_linux.zip` —— 见第五个坑）。
+
+**怎么查下一回缺什么**（本机 pub-cache 里就能读，不用猜）：
+
+```bash
+for d in ~/.pub-cache/hosted/pub.dev/*; do
+  f="$d/android/build.gradle"; [ -f "$f" ] || f="$d/android/build.gradle.kts"; [ -f "$f" ] || continue
+  printf '%-46s %s\n' "$(basename "$d")" "$(grep -hoE 'compileSdk(Version)?[ =]+[0-9]+' "$f" | head -1)"
+done
+```
+
 #### 修法（二选一）
 
 **① 改 runner 的标签（推荐，一处改完所有仓库都受益）**

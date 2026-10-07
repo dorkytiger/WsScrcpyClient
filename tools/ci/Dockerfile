@@ -57,15 +57,24 @@ RUN mkdir -p /opt/dev \
  && /opt/dev/flutter/bin/flutter precache --linux --web --android
 
 # Android SDK：腾讯镜像（dl.google.com 不通）+ 手写许可文件；不装 cmdline-tools
+# 平台要装多个：**每个插件有自己的 compileSdk**（实测 flutter_secure_storage=34、
+# sqlite3_flutter_libs/jni=35，app 自己=36），少一个就报
+# "Failed to find Platform SDK with path: platforms;android-34"。
+# build-tools 同理按 AGP 默认版本给（插件用的 AGP 8.5.1 默认要 34.0.0）。
 RUN set -eux; \
     SDK=/opt/dev/android-sdk; \
     base=https://mirrors.cloud.tencent.com/AndroidSDK; \
     mkdir -p "$SDK/platforms" "$SDK/build-tools" "$SDK/licenses"; \
     fetch() { curl -fSL --retry 3 --retry-delay 2 -o /tmp/pkg.zip "$base/$1"; }; \
     unpack_to() { rm -rf /tmp/unpack; mkdir -p /tmp/unpack; unzip -q /tmp/pkg.zip -d /tmp/unpack; mv "$(find /tmp/unpack -mindepth 1 -maxdepth 1 | head -1)" "$1"; }; \
-    fetch platform-36_r02.zip && unpack_to "$SDK/platforms/android-36"; \
-    fetch build-tools_r36_linux.zip && unpack_to "$SDK/build-tools/36.0.0"; \
-    fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"; \
+    install_pkg() { if [ -d "$2" ]; then echo "已有 $2"; else fetch "$1" && unpack_to "$2"; fi; }; \
+    install_pkg platform-36_r02.zip          "$SDK/platforms/android-36"; \
+    install_pkg platform-35_r02.zip          "$SDK/platforms/android-35"; \
+    install_pkg platform-34-ext7_r03.zip     "$SDK/platforms/android-34"; \
+    install_pkg build-tools_r36_linux.zip    "$SDK/build-tools/36.0.0"; \
+    install_pkg build-tools_r35_linux.zip    "$SDK/build-tools/35.0.0"; \
+    install_pkg build-tools_r34-linux.zip    "$SDK/build-tools/34.0.0"; \
+    install_pkg platform-tools_r37.0.1-linux.zip "$SDK/platform-tools"; \
     printf '%s\n' \
       8933bad161af4178b1185d1a37fbf41ea5269c55 \
       d56f5187479451eabf01fb78af6dfcb131a6481e \

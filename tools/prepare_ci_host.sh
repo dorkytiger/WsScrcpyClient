@@ -83,13 +83,17 @@ fi
 say "准备 Android SDK 到 $SDK_DIR"
 mkdir -p "$SDK_DIR/platforms" "$SDK_DIR/build-tools" "$SDK_DIR/licenses"
 
-[ -d "$SDK_DIR/platforms/android-36" ] \
-  && echo "    platform 36 已在（跳过）" \
-  || unpack_one "$PLATFORM_ZIP" "$SDK_DIR/platforms/android-36"
-
-[ -d "$SDK_DIR/build-tools/36.0.0" ] \
-  && echo "    build-tools 36.0.0 已在（跳过）" \
-  || unpack_one "$BUILD_TOOLS_ZIP" "$SDK_DIR/build-tools/36.0.0"
+# 插件各有自己的 compileSdk（实测 34 与 35 都要），少一个就报
+# "Failed to find Platform SDK with path: platforms;android-34"
+install_one() { # $1=zip 名  $2=目标目录
+  if [ -d "$2" ]; then echo "    $2 已在（跳过）"; else unpack_one "$1" "$2"; fi
+}
+install_one "$PLATFORM_ZIP"        "$SDK_DIR/platforms/android-36"
+install_one platform-35_r02.zip    "$SDK_DIR/platforms/android-35"
+install_one platform-34-ext7_r03.zip "$SDK_DIR/platforms/android-34"
+install_one "$BUILD_TOOLS_ZIP"     "$SDK_DIR/build-tools/36.0.0"
+install_one build-tools_r35_linux.zip "$SDK_DIR/build-tools/35.0.0"
+install_one build-tools_r34-linux.zip "$SDK_DIR/build-tools/34.0.0"
 
 [ -d "$SDK_DIR/platform-tools" ] \
   && echo "    platform-tools 已在（跳过）" \

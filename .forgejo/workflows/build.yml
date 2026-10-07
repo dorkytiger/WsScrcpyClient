@@ -317,9 +317,20 @@ jobs:
             mv "$(find /tmp/unpack -mindepth 1 -maxdepth 1 | head -1)" "$1"
           }
 
-          [ -d "$SDK/platforms/android-36" ]          || { fetch platform-36_r02.zip && unpack_to "$SDK/platforms/android-36"; }
-          [ -d "$SDK/build-tools/36.0.0" ]            || { fetch build-tools_r36_linux.zip && unpack_to "$SDK/build-tools/36.0.0"; }
-          [ -d "$SDK/platform-tools" ]                || { fetch platform-tools_r37.0.1-linux.zip && unpack_to "$SDK/platform-tools"; }
+          # ★ 插件各有各的 compileSdk，缺哪个就会报
+          #   "Failed to find Platform SDK with path: platforms;android-34"
+          #   （实测：flutter_secure_storage=34、sqlite3_flutter_libs/jni=35；app 自己是 36）
+          # build-tools 也要按 AGP 的默认版本给（插件自己用的 AGP 8.5.1 默认要 34.0.0）。
+          install_pkg() { # $1=zip 名  $2=目标目录
+            if [ -d "$2" ]; then echo "已有 $2（跳过）"; else fetch "$1" && unpack_to "$2"; fi
+          }
+          install_pkg platform-36_r02.zip          "$SDK/platforms/android-36"
+          install_pkg platform-35_r02.zip          "$SDK/platforms/android-35"
+          install_pkg platform-34-ext7_r03.zip     "$SDK/platforms/android-34"
+          install_pkg build-tools_r36_linux.zip    "$SDK/build-tools/36.0.0"
+          install_pkg build-tools_r35_linux.zip    "$SDK/build-tools/35.0.0"
+          install_pkg build-tools_r34-linux.zip    "$SDK/build-tools/34.0.0"
+          install_pkg platform-tools_r37.0.1-linux.zip "$SDK/platform-tools"
 
           # 许可文件：不写的话 AGP 认为许可没接受，直接拒绝构建
           printf '%s\n' \
