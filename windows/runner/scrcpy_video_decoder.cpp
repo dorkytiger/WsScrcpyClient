@@ -149,6 +149,15 @@ std::string HresultText(HRESULT result) {
   return buffer;
 }
 
+// LUID / 句柄这类 64 位标识的十六进制文本（与 d3d11_video_presenter.cpp 的
+// HandleText 同一个格式，日志里能把两边的适配器 LUID 直接对上）。
+std::string LuidText(uint64_t luid) {
+  char buffer[32] = {};
+  std::snprintf(buffer, sizeof(buffer), "0x%llX",
+                static_cast<unsigned long long>(luid));
+  return buffer;
+}
+
 // 相对模块首次写日志的毫秒数（初始化之前是 -1，日志里照原样显示）。
 long long NowMs() { return ws_scrcpy::LogElapsedMs(); }
 
@@ -382,9 +391,11 @@ size_t WsRequiredOutputBytes(Yuv420Layout layout, size_t stride, uint32_t width,
 class ScrcpyVideoDecoder::Impl {
  public:
   Impl(flutter::TextureRegistrar* texture_registrar,
-       ws_scrcpy::DecoderStartupTimings startup)
+       ws_scrcpy::DecoderStartupTimings startup,
+       ws_scrcpy::EngineRenderingAdapter engine_adapter)
       : texture_registrar_(texture_registrar),
         startup_(startup),
+        engine_adapter_(std::move(engine_adapter)),
         pixel_store_(std::make_shared<PixelBufferStore>()) {}
 
   ~Impl() { Release(); }
@@ -432,6 +443,8 @@ class ScrcpyVideoDecoder::Impl {
 
   flutter::TextureRegistrar* texture_registrar_ = nullptr;
   ws_scrcpy::DecoderStartupTimings startup_;
+  // 引擎在**哪块**适配器上渲染（通道层问出来的）：GPU 呈现路能不能开，就看这一条。
+  ws_scrcpy::EngineRenderingAdapter engine_adapter_;
   SizeState size_state_;
   std::shared_ptr<PixelBufferStore> pixel_store_;
 
@@ -443,6 +456,8 @@ class ScrcpyVideoDecoder::Impl {
   bool gpu_path_ = false;
   // 非 NV12 / 自下而上的输出只能走 CPU 换算，这条一次性日志避免每帧刷屏。
   bool gpu_layout_fallback_logged_ = false;
+  // GPU 路的"首帧纹理自检"只跑一次（见 FinalizePublish 里的说明）。
+  bool gpu_content_checked_ = false;
 
   // 纹理对象必须活到注销完成（引擎持有指向它的指针）。
   std::shared_ptr<flutter::TextureVariant> texture_;
@@ -499,6 +514,9 @@ class ScrcpyVideoDecoder::Impl {
   // 引擎侧节奏（光栅线程）：上一秒的累计值，心跳里算"本秒 +N"。
   // 比较它与"已发布"的增速就能定位瓶颈在我们这侧还是引擎侧（判据见 AGENTS.md §12.8）。
   uint64_t previous_raster_callbacks_ = 0;
+  // "发布 → 引擎取走"延迟的上一秒累计值（口径见 present_latency.h）：心跳里算本秒平均。
+  uint64_t previous_present_samples_ = 0;
+  uint64_t previous_present_sum_us_ = 0;
   // 停摆检测用：上一秒的"已发布"累计值 + 连续停摆秒数 + 上次报警时刻。
   uint64_t previous_published_frames_ = 0;
   int engine_stall_seconds_ = 0;
@@ -609,23 +627,42 @@ int64_t ScrcpyVideoDecoder::Impl::Start() {
   // 这件事——这就是 Windows 端"又卡又延迟"的结构性差距（AGENTS.md §12.8）。
   // 回落路径必须保留：D3D11 设备/共享纹理在某些环境（远程桌面、驱动异常、多显卡）
   // 会建不起来，那时宁可回到"能用但 CPU 忙"的老路，也不能黑屏。
-  const ws_scrcpy::PresenterOptions presenter_options =
+  //
+  // **2026-10-08 起默认是"能证明同适配器才走 GPU"**（PresenterOptions::Mode::kAuto）：
+  // 引擎渲染适配器的 LUID 由通道层问出来（engine_adapter_），交给呈现器按 LUID 对齐；
+  // 对不上就自动回落 CPU 路，不需要用户做任何事。A/B 用 WS_SCRCPY_GPU=1 / =0。
+  ws_scrcpy::PresenterOptions presenter_options =
       ws_scrcpy::PresenterOptions::FromEnvironment();
-  if (presenter_options.enabled) {
+  presenter_options.have_engine_adapter = engine_adapter_.known;
+  presenter_options.engine_adapter_luid = engine_adapter_.luid;
+  DebugLog("引擎渲染适配器：" +
+           (engine_adapter_.known
+                ? (engine_adapter_.name.empty() ? std::string("<无名>")
+                                                : engine_adapter_.name) +
+                      "（LUID " + LuidText(engine_adapter_.luid) + "）"
+                : std::string("未知（问不到引擎的适配器 → 默认不启用 GPU 呈现路）")));
+  const bool try_gpu = presenter_options.mode !=
+                       ws_scrcpy::PresenterOptions::Mode::kForceOff;
+  if (try_gpu) {
     auto presenter = std::make_shared<ws_scrcpy::D3d11VideoPresenter>();
     if (presenter->Create(kInitialWidth, kInitialHeight, presenter_options)) {
       presenter_ = presenter;
       gpu_path_ = true;
       DebugLog("呈现路径：GPU 共享纹理（D3D11 → RGBA → DXGI 共享句柄），适配器=" +
                (presenter->device_name().empty() ? std::string("<未知>")
-                                                 : presenter->device_name()));
+                                                 : presenter->device_name()) +
+               "，与引擎同适配器=" +
+               (presenter->engine_adapter_matched() ? "是" : "否") +
+               (presenter->engine_adapter_matched()
+                    ? "（共享句柄可被引擎打开的前提成立）"
+                    : "（**强制模式**下不满足前提，画面可能全黑；见 AGENTS §12.8）"));
     } else {
-      DebugLog("呈现路径：CPU 像素缓冲（GPU 路不可用：" + presenter->LastError() +
-               "；默认本来就是 CPU 路，设 WS_SCRCPY_GPU=1 才会试 GPU 路）");
+      DebugLog("呈现路径：CPU 像素缓冲（GPU 路不可用：" + presenter->LastError() + "）");
     }
   } else {
-    DebugLog("呈现路径：CPU 像素缓冲（GPU 共享纹理路默认关闭：真机上全黑，见 AGENTS §12.8；"
-             "设 WS_SCRCPY_GPU=1 可显式启用）");
+    DebugLog(std::string("呈现路径：CPU 像素缓冲（GPU 共享纹理路**默认关闭**：2026-10-08") +
+             "那次『同适配器 + 引擎正常取帧』也全黑，还没在屏幕上验过，见 AGENTS §12.8；" +
+             "想试 GPU 路设 WS_SCRCPY_GPU=1，想按引擎适配器自动判定设 WS_SCRCPY_GPU=auto）");
   }
 
   ApplySize(kInitialWidth, kInitialHeight);
@@ -1142,11 +1179,15 @@ void ScrcpyVideoDecoder::Impl::MaybeLogHeartbeat(bool stopping) {
   const long long average_interval_us = average_of(decode_times_us_);
   const long long average_process_us = average_of(process_times_us_);
   const long long average_convert_us = average_of(convert_times_us_);
+  // GPU 路没有 CPU 换算（换算在像素着色器里），样本队列本来就是空的：
+  // 这里按 0 参与拆分，让 A/B 时"换算"那格显示 0ms 而不是"尚无样本"（否则没法对比）。
+  const long long convert_split_us = gpu_path_ ? 0 : average_convert_us;
   const long long average_mft_us =
-      (average_process_us >= 0 && average_convert_us >= 0 &&
-       average_process_us > average_convert_us)
-          ? average_process_us - average_convert_us
-          : -1;
+      (average_process_us >= 0 && convert_split_us >= 0 &&
+       average_process_us > convert_split_us)
+          ? average_process_us - convert_split_us
+          : (average_process_us >= 0 && convert_split_us == 0 ? average_process_us
+                                                             : -1);
   auto ms_text = [](long long microseconds) {
     return microseconds < 0 ? std::string("尚无样本")
                             : std::to_string(microseconds / 1000) + "ms";
@@ -1177,6 +1218,36 @@ void ScrcpyVideoDecoder::Impl::MaybeLogHeartbeat(bool stopping) {
           ? raster_callbacks - previous_raster_callbacks_
           : raster_callbacks;
   previous_raster_callbacks_ = raster_callbacks;
+
+  // ---- "发布 → 引擎取走"的延迟（本秒平均）----
+  //
+  // 这是 §12.8 三件事里的第三件（present 节奏）**唯一**的量：引擎按自己的 vsync 来取纹理，
+  // 我们发布得再快也得等下一个 vsync；这一段多长、换了呈现路有没有变短，只有这个数字能回答。
+  // 口径与 CPU 路完全一致（两条路共用 present_latency.h），所以 GPU/CPU 可以直接 A/B：
+  //   - 本秒平均偏高（比如 > 20ms）→ 引擎取帧节奏是瓶颈，跟我们解码快不快无关；
+  //   - 样本数本秒为 0 → 引擎这一秒一次都没取到新帧（配合下面的停摆告警一起看）。
+  const uint64_t present_samples =
+      (gpu_path_ && presenter_ != nullptr) ? presenter_->present_latency_samples()
+                                           : pixel_store_->present_latency_samples();
+  const uint64_t present_sum_us =
+      (gpu_path_ && presenter_ != nullptr) ? presenter_->present_latency_sum_us()
+                                           : pixel_store_->present_latency_sum_us();
+  const uint64_t present_samples_per_second =
+      present_samples >= previous_present_samples_
+          ? present_samples - previous_present_samples_
+          : present_samples;
+  const uint64_t present_sum_per_second =
+      present_sum_us >= previous_present_sum_us_
+          ? present_sum_us - previous_present_sum_us_
+          : present_sum_us;
+  previous_present_samples_ = present_samples;
+  previous_present_sum_us_ = present_sum_us;
+  const std::string present_latency_text =
+      present_samples_per_second == 0
+          ? std::string("本秒无样本")
+          : (std::to_string(present_sum_per_second /
+                            present_samples_per_second / 1000) +
+             "ms");
 
   // ---- 停摆检测（用户报的现象：网页端早就操作完了，Flutter 端"时不时卡几秒才显示"）----
   //
@@ -1223,7 +1294,9 @@ void ScrcpyVideoDecoder::Impl::MaybeLogHeartbeat(bool stopping) {
                  ms_text(average_upload_us) + "）";
   }
   path_text += "，光栅回调 " + std::to_string(raster_callbacks) + "（本秒 +" +
-               std::to_string(raster_per_second) + "），队列等待 " +
+               std::to_string(raster_per_second) + "），引擎取帧延迟 " +
+               present_latency_text + "（本秒 " +
+               std::to_string(present_samples_per_second) + " 帧），队列等待 " +
                ms_text(average_queue_wait_us) + "，队列上限 " +
                std::to_string(kMaxPendingFrames);
 
@@ -1235,7 +1308,7 @@ void ScrcpyVideoDecoder::Impl::MaybeLogHeartbeat(bool stopping) {
                      ms_text(average_interval_us) + "，平均处理 " +
                      ms_text(average_process_us) + "（解码 " +
                      ms_text(average_mft_us) + " + 换算 " +
-                     ms_text(average_convert_us) + "）" + size_text + path_text +
+                     ms_text(convert_split_us) + "）" + size_text + path_text +
                      "，本帧处理 " + ms_text(last_process_us_) + "，本帧换算 " +
                      ms_text(last_convert_us_) +
                      // 累计失败数放在心跳里：这样"解不出来"不用翻日志也能一眼看到，
@@ -1995,6 +2068,17 @@ void ScrcpyVideoDecoder::Impl::FinalizePublish(bool gpu_path) {
                 "x" + std::to_string(output_height_) + "，跨距 " +
                 std::to_string(output_stride_) + "，本帧上传 " +
                 std::to_string(last_upload_us_ / 1000) + "ms（无 CPU 换算）");
+    // ★ 首帧内容自检（只跑一次）：把刚画进共享纹理的那一帧回读一遍，报"有没有画面"。
+    //
+    // 为什么必须有它（2026-10-08 的教训）：那次 GPU 路的表现是"引擎匹配=是、引擎一直在
+    // 按 vsync 取帧（光栅回调在涨、引擎取帧延迟有数），但屏幕全黑"。只看计数无法区分
+    // "我们没画进去"和"引擎没消费"。这条日志把它一刀切开：
+    //   非黑比例高 → 纹理里有画面，问题在引擎侧消费/合成；
+    //   全黑       → 问题在我们这一侧（上传/着色器/尺寸），不用去猜引擎。
+    if (presenter_ != nullptr && !gpu_content_checked_) {
+      gpu_content_checked_ = true;
+      DebugLog("GPU 首帧纹理自检：" + presenter_->FirstFrameContentReport());
+    }
   } else {
     // 保留原有的"首帧解出"一次性日志（排查时按这几行找）。
     LogOnce("first-decoded-frame",
@@ -2050,8 +2134,10 @@ void ScrcpyVideoDecoder::Impl::SetError(const std::string& message) {
 
 ScrcpyVideoDecoder::ScrcpyVideoDecoder(
     flutter::TextureRegistrar* texture_registrar,
-    ws_scrcpy::DecoderStartupTimings startup)
-    : impl_(std::make_unique<Impl>(texture_registrar, startup)) {}
+    ws_scrcpy::DecoderStartupTimings startup,
+    ws_scrcpy::EngineRenderingAdapter engine_adapter)
+    : impl_(std::make_unique<Impl>(texture_registrar, startup,
+                                   std::move(engine_adapter))) {}
 
 // 析构必须写在这里（而不是头文件里的 `= default`）：`Impl` 是不完整类型时
 // `unique_ptr<Impl>` 的删除器没法实例化；本 .cpp 里 Impl 已经完整定义，没问题。

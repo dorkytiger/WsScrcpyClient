@@ -19,6 +19,7 @@
 		D0DEC0DE00000000000000B1 /* ScrcpyVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0DEC0DE00000000000000A1 /* ScrcpyVideoDecoder.swift */; };
 		D0DEC0DE00000000000000B2 /* ScrcpyVideoTexture.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0DEC0DE00000000000000A2 /* ScrcpyVideoTexture.swift */; };
 		D0DEC0DE00000000000000B3 /* ScrcpyVideoChannelHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0DEC0DE00000000000000A3 /* ScrcpyVideoChannelHandler.swift */; };
+		D0DEC0DE00000000000000B4 /* ScrcpyVideoSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0DEC0DE00000000000000A4 /* ScrcpyVideoSurface.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,6 +66,7 @@
 		D0DEC0DE00000000000000A1 /* ScrcpyVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrcpyVideoDecoder.swift; sourceTree = "<group>"; };
 		D0DEC0DE00000000000000A2 /* ScrcpyVideoTexture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrcpyVideoTexture.swift; sourceTree = "<group>"; };
 		D0DEC0DE00000000000000A3 /* ScrcpyVideoChannelHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrcpyVideoChannelHandler.swift; sourceTree = "<group>"; };
+		D0DEC0DE00000000000000A4 /* ScrcpyVideoSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrcpyVideoSurface.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -149,6 +151,7 @@
 				D0DEC0DE00000000000000A1 /* ScrcpyVideoDecoder.swift */,
 				D0DEC0DE00000000000000A2 /* ScrcpyVideoTexture.swift */,
 				D0DEC0DE00000000000000A3 /* ScrcpyVideoChannelHandler.swift */,
+				D0DEC0DE00000000000000A4 /* ScrcpyVideoSurface.swift */,
 			);
 			name = darwin;
 			path = ../darwin;
@@ -321,6 +324,7 @@
 				D0DEC0DE00000000000000B1 /* ScrcpyVideoDecoder.swift in Sources */,
 				D0DEC0DE00000000000000B2 /* ScrcpyVideoTexture.swift in Sources */,
 				D0DEC0DE00000000000000B3 /* ScrcpyVideoChannelHandler.swift in Sources */,
+				D0DEC0DE00000000000000B4 /* ScrcpyVideoSurface.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

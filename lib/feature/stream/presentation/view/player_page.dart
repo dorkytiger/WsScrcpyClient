@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show DeviceOrientation, SystemChrome;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:ws_scrcpy_client/common/theme/app_tokens.dart';
 import 'package:ws_scrcpy_client/common/widget/async_state_view.dart';
@@ -19,6 +22,7 @@ import 'package:ws_scrcpy_client/feature/stream/enum/stream_connection_status.da
 import 'package:ws_scrcpy_client/feature/stream/enum/video_bounds_mode.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/view/web_video_surface.dart';
 import 'package:ws_scrcpy_client/feature/stream/presentation/viewmodel/player_viewmodel.dart';
+import 'package:ws_scrcpy_client/feature/stream/presentation/view/native_video_surface.dart';
 
 /// 投流页。
 ///
@@ -96,6 +100,30 @@ class _PlayerPageState extends State<PlayerPage> {
     }
   }
 
+  /// 旋转**本机界面**（这个 App 自己的朝向），竖屏 ⇄ 横屏。
+  ///
+  /// 与「更多」面板里的「旋转设备屏幕」是**两件事**：那个发控制命令让**被控设备**转，
+  /// 这个只改本机窗口朝向（`SystemChrome.setPreferredOrientations`）。
+  /// 用户 2026-10-08 要的是后者 —— "旋转当前手机的 app 的那种旋转"：
+  /// 竖屏下画面只有中间一条，转成横屏能大不少。
+  void _rotateOwnScreen() {
+    final isLandscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    final next = isLandscape
+        ? const <DeviceOrientation>[DeviceOrientation.portraitUp]
+        : const <DeviceOrientation>[
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ];
+    _logger.info('旋转本机界面 → ${isLandscape ? '竖屏' : '横屏'}');
+    SystemChrome.setPreferredOrientations(next).catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      _logger.warn('设置本机朝向失败', error, stackTrace);
+    });
+  }
+
   /// 打开"更多"面板并派发选中的动作。
   ///
   /// 先关面板再发命令：避免命令失败时 SnackBar 被面板盖住看不见。
@@ -115,10 +143,9 @@ class _PlayerPageState extends State<PlayerPage> {
       return;
     }
     switch (action) {
-      case _MoreAction.wakeDevice:
-        await _send(
-          () => Future<Result<void>>.value(widget.viewModel.wakeDevice()),
-        );
+      case _MoreAction.showLogs:
+        // 日志开关从右上角搬到这里（2026-10-08 用户要求：那个位置让给「填满屏幕」）。
+        setState(() => _showLogs = !_showLogs);
       case _MoreAction.volumeUp:
         await _send(
           () => widget.viewModel.pressNavigationKey(NavigationKey.volumeUp),
@@ -165,47 +192,80 @@ class _PlayerPageState extends State<PlayerPage> {
         // 竖屏：维持原样（顶栏 + 底部快捷栏），拇指够得着、也更符合习惯。
         final media = MediaQuery.sizeOf(context);
         final isLandscape = media.width > media.height;
-        return Scaffold(
-          appBar: isLandscape
-              ? null
-              : AppBar(
-                  title: Text(widget.title),
-                  actions: <Widget>[_logButton()],
+        // 填满屏幕时**什么边栏都不渲染**（竖屏 AppBar / 横屏顶栏浮层 / 快捷栏 / 日志面板）。
+        final fillScreen = widget.viewModel.fillScreen;
+        return PopScope(
+          // ★ 填满状态下**不许直接退出投流页**。
+          //
+          // 为什么：Android 的"从屏幕左边缘往右/往左滑"是**系统返回手势**，起手在边缘的那一滑
+          // 会被系统直接吃掉（页内那个 `_FillScreenExit` 根本收不到指针事件），
+          // 用户的体验就是"左滑只会返回上一层"（2026-10-08 反馈）。
+          // 这里把返回拦下来，**改成退出填满屏幕** —— 于是
+          // ① 系统边滑 ② 系统返回键/手势导航 ③ 页内（非边缘）左滑 三条路是同一个结果。
+          canPop: !fillScreen,
+          onPopInvokedWithResult: (bool didPop, Object? result) {
+            if (didPop || !fillScreen) {
+              return;
+            }
+            widget.viewModel.setFillScreen(false);
+          },
+          child: Scaffold(
+            appBar: (isLandscape || fillScreen)
+                ? null
+                : AppBar(
+                    title: Text(widget.title),
+                    actions: <Widget>[_fillScreenButton()],
+                  ),
+            body: AsyncStateView<StreamSessionSnapshot>(
+              state: widget.viewModel.state,
+              onRetry: widget.viewModel.retry,
+              errorHint: widget.target.candidateUris.isEmpty
+                  ? '设备未上报网卡地址'
+                  : '已尝试 ${widget.target.candidateUris.length} 个地址（代理优先）',
+              loadingBuilder: (BuildContext context) => const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    CircularProgressIndicator(),
+                    SizedBox(height: AppSpacing.md),
+                    Text('正在建立投流连接…'),
+                  ],
                 ),
-          body: AsyncStateView<StreamSessionSnapshot>(
-            state: widget.viewModel.state,
-            onRetry: widget.viewModel.retry,
-            errorHint: widget.target.candidateUris.isEmpty
-                ? '设备未上报网卡地址'
-                : '已尝试 ${widget.target.candidateUris.length} 个地址（代理优先）',
-            loadingBuilder: (BuildContext context) => const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  CircularProgressIndicator(),
-                  SizedBox(height: AppSpacing.md),
-                  Text('正在建立投流连接…'),
-                ],
               ),
+              dataBuilder: (BuildContext context, StreamSessionSnapshot data) =>
+                  fillScreen
+                  ? _fillScreenBody(data)
+                  : (isLandscape ? _landscapeBody(data) : _portraitBody(data)),
             ),
-            dataBuilder: (BuildContext context, StreamSessionSnapshot data) =>
-                isLandscape ? _landscapeBody(data) : _portraitBody(data),
           ),
         );
       },
     );
   }
 
-  Widget _logButton() => IconButton(
-    tooltip: _showLogs ? '隐藏日志' : '显示日志',
-    onPressed: () => setState(() => _showLogs = !_showLogs),
-    icon: Icon(_showLogs ? Icons.article : Icons.article_outlined),
+  /// **填满屏幕**（2026-10-08 用户要求：这个位置原本是"日志"按钮）。
+  ///
+  /// 点一下 = 隐藏上下边栏 + 画面填满整块屏幕；退出靠画面上的**左滑**。
+  /// 日志的开关搬到「更多」面板里了（`_MoreAction.showLogs`）。
+  Widget _fillScreenButton() => IconButton(
+    tooltip: '填满屏幕（隐藏上下边栏，左滑退出）',
+    onPressed: () => widget.viewModel.setFillScreen(true),
+    icon: const Icon(Icons.fullscreen),
   );
 
-  /// 只在快捷栏里放"返回/主页/最近/更多"四个高频入口，其余动作收进"更多"面板。
+  /// 快捷栏：返回 / 主页 / 最近 / **旋转本机** / 更多（横屏再加一个「顶栏」）。
+  ///
+  /// [onRotate] 转的是**本机界面**（这个 App 自己的朝向），不是被控设备 ——
+  /// 转被控设备那条命令在「更多」面板里（`_MoreAction.rotateDevice`）。
+  ///
+  /// [onToggleChrome] 只在横屏（竖排快捷栏）传：横屏没有 AppBar，顶栏是一个**浮层**，
+  /// 而它必须有个开关 —— 这个开关**放在快捷栏里，不能浮在画面上**：
+  /// 浮在画面上的按钮会**抢走那一片区域的点击**（用户 2026-10-08 反馈"挡住投流内容、
+  /// 某些区域点不了"）。快捷栏在画面区之外，放这里两边都不挡。
   Widget _quickBar(
     StreamSessionSnapshot data, {
     Axis axis = Axis.horizontal,
+    VoidCallback? onToggleChrome,
   }) => _QuickBar(
     axis: axis,
     enabled: data.status.isUsable,
@@ -216,6 +276,21 @@ class _PlayerPageState extends State<PlayerPage> {
     onRecents: () =>
         _send(() => widget.viewModel.pressNavigationKey(NavigationKey.recents)),
     onMore: _openMoreActions,
+    onRotate: _rotateOwnScreen,
+    onToggleChrome: onToggleChrome,
+  );
+
+  /// **填满屏幕**状态：整块屏幕只有画面，上下边栏一律不渲染；左滑退出。
+  ///
+  /// 刻意**不**留任何退出按钮：画面区里放本地按钮就会吃掉它下面那一片的点击
+  /// （用户 2026-10-08 反馈过两次）。退出方式就是用户指定的那个手势。
+  Widget _fillScreenBody(StreamSessionSnapshot data) => _FillScreenExit(
+    onExit: () => widget.viewModel.setFillScreen(false),
+    child: _VideoStage(
+      snapshot: data,
+      viewModel: widget.viewModel,
+      focusNode: _keyboardFocusNode,
+    ),
   );
 
   Widget _portraitBody(StreamSessionSnapshot data) => Column(
@@ -238,16 +313,16 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 顶栏 56 + 快捷栏 64 就吃掉 30%）。把快捷栏竖过来正好把浪费的横向空间
   /// 换成画面的高度：画面从 501x282 变成约 615x346（**像素 +50%**），而且不裁切。
   Widget _landscapeBody(StreamSessionSnapshot data) {
-    // 缺口安全区：iOS 横屏左右**都**会报（见 §9.4），所以避让时左右都让，
-    // 填满时一点不让。竖屏不走这里（顶栏本身就在缺口下面）。
-    final EdgeInsets cutout = widget.viewModel.fillCutout
-        ? EdgeInsets.zero
-        : EdgeInsets.only(
-            // 用 `padding` 而不是 `viewPadding`：与 `SafeArea` 同一个语义来源
-            // （键盘等消费掉的安全区不该再算一遍）。
-            left: MediaQuery.paddingOf(context).left,
-            right: MediaQuery.paddingOf(context).right,
-          );
+    // 缺口安全区：iOS 横屏左右**都**会报（见 §9.4），所以左右都让开 ——
+    // 这一条**没有开关**（2026-10-08 按用户要求删掉了"画面填满到灵动岛"：
+    // 打开它只是把 59 点的空白换回来，缺口还可能压住内容，没有意义）。
+    // 竖屏不走这里（顶栏本身就在缺口下面）。
+    final EdgeInsets cutout = EdgeInsets.only(
+      // 用 `padding` 而不是 `viewPadding`：与 `SafeArea` 同一个语义来源
+      // （键盘等消费掉的安全区不该再算一遍）。
+      left: MediaQuery.paddingOf(context).left,
+      right: MediaQuery.paddingOf(context).right,
+    );
     return Row(
       children: <Widget>[
         Expanded(
@@ -277,33 +352,25 @@ class _PlayerPageState extends State<PlayerPage> {
                       // 横屏没有 AppBar → 也就没有返回箭头（浏览器更没有系统返回键）。
                       // 原生端靠系统返回/手势，web 上必须给一个入口，否则回不到设备列表。
                       onBack: () => Navigator.of(context).maybePop(),
-                      fitMode: widget.viewModel.videoFitMode,
-                      onToggleFit: () => widget.viewModel.setVideoFitMode(
-                        widget.viewModel.videoFitMode.toggled,
-                      ),
-                      showLogs: _showLogs,
-                      onToggleLogs: () =>
-                          setState(() => _showLogs = !_showLogs),
+                      // 这个位置原本是"铺满/日志"两个图标，2026-10-08 按用户要求合成一个
+                      // 「填满屏幕」：隐藏上下边栏 + 画面填满；日志搬进「更多」面板。
+                      onFill: () => widget.viewModel.setFillScreen(true),
                       onHide: () => setState(() => _chromeVisible = false),
                     ),
-                  )
-                else
-                  // 常驻的小入口（半透明、只占左上角一点）。
-                  // 刻意**不做**"点画面唤出"：画面上的点击是要发给被控设备的。
-                  Align(
-                    alignment: Alignment.topLeft,
-                    child: Padding(
-                      padding: const EdgeInsets.all(AppSpacing.xs),
-                      child: _ChromeHandle(
-                        onPressed: () => setState(() => _chromeVisible = true),
-                      ),
-                    ),
                   ),
+                // 注意：**这里刻意不再放"常驻小圆钮"**。它以前浮在画面左上角唤出顶栏，
+                // 结果把那一小片区域的点击全吃掉了（用户 2026-10-08 反馈）。现在唤出入口
+                // 在竖排快捷栏里（`_quickBar(..., onToggleChrome: …)`），完全在画面之外。
               ],
             ),
           ),
         ),
-        _quickBar(data, axis: Axis.vertical),
+        _quickBar(
+          data,
+          axis: Axis.vertical,
+          onToggleChrome: () =>
+              setState(() => _chromeVisible = !_chromeVisible),
+        ),
       ],
     );
   }
@@ -421,7 +488,9 @@ class _VideoStage extends StatelessWidget {
                   child: SizedBox(
                     width: (size?.width ?? 1280).toDouble(),
                     height: (size?.height ?? 720).toDouble(),
-                    child: Texture(textureId: textureId),
+                    child: NativeVideoSurface.isEnabled
+                        ? const NativeVideoSurface()
+                        : Texture(textureId: textureId),
                   ),
                 ),
               ),
@@ -678,7 +747,10 @@ class _VideoPlaceholder extends StatelessWidget {
 
 /// "更多"面板里的动作：文案与图标都挂在枚举上，UI 不再散落字符串。
 enum _MoreAction {
-  wakeDevice('唤醒设备屏幕', Icons.lightbulb_outline),
+  /// 显示 / 隐藏日志面板（点一下切换）。
+  ///
+  /// 2026-10-08 用户要求从"右上角的日志按钮"搬到这里 —— 那个位置改成了「填满屏幕」。
+  showLogs('日志', Icons.article_outlined),
   volumeUp('音量 +', Icons.volume_up_outlined),
   volumeDown('音量 −', Icons.volume_down_outlined),
   power('电源键', Icons.power_settings_new),
@@ -709,10 +781,7 @@ class _ChromeBar extends StatelessWidget {
   const _ChromeBar({
     required this.title,
     required this.onBack,
-    required this.fitMode,
-    required this.onToggleFit,
-    required this.showLogs,
-    required this.onToggleLogs,
+    required this.onFill,
     required this.onHide,
   });
 
@@ -721,16 +790,14 @@ class _ChromeBar extends StatelessWidget {
   /// 返回设备列表（横屏没有 AppBar，只能自己给一个）。
   final VoidCallback onBack;
 
-  final VideoFitMode fitMode;
-  final VoidCallback onToggleFit;
-  final bool showLogs;
-  final VoidCallback onToggleLogs;
+  /// 填满屏幕（隐藏上下边栏，把整块屏幕交给画面、画面按 fit 铺进去；退出靠画面左滑）。
+  final VoidCallback onFill;
+
   final VoidCallback onHide;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isContain = fitMode == VideoFitMode.contain;
     return Material(
       color: theme.colorScheme.surface.withValues(alpha: 0.92),
       child: SafeArea(
@@ -753,15 +820,9 @@ class _ChromeBar extends StatelessWidget {
                 ),
               ),
               IconButton(
-                tooltip: isContain ? '铺满屏幕（会裁掉画面上下边缘）' : '完整显示（保留黑边）',
-                onPressed: onToggleFit,
-                icon: Icon(isContain ? Icons.fit_screen : Icons.aspect_ratio),
-                visualDensity: VisualDensity.compact,
-              ),
-              IconButton(
-                tooltip: showLogs ? '隐藏日志' : '显示日志',
-                onPressed: onToggleLogs,
-                icon: Icon(showLogs ? Icons.article : Icons.article_outlined),
+                tooltip: '填满屏幕（隐藏上下边栏，左滑退出）',
+                onPressed: onFill,
+                icon: const Icon(Icons.fullscreen),
                 visualDensity: VisualDensity.compact,
               ),
               IconButton(
@@ -779,37 +840,114 @@ class _ChromeBar extends StatelessWidget {
   }
 }
 
-/// 横屏顶栏收起后的常驻唤出入口（半透明小圆钮，只占左上角一点）。
-///
-/// **刻意不做"点画面唤出"**：画面上的点击是要发给被控设备的，
-/// 同一手势不能既操作远端又开关本地 UI。
-class _ChromeHandle extends StatelessWidget {
-  const _ChromeHandle({required this.onPressed});
+// 这里以前有个 `_ChromeHandle`（横屏顶栏收起后的半透明小圆钮，浮在画面左上角）。
+// 2026-10-08 删除：它浮在画面上会**抢走那一片区域的点击**，用户反馈"挡住投流内容、
+// 某些区域点不了"。唤出入口已挪到竖排快捷栏里的「顶栏」按钮（画面区之外）。
 
-  final VoidCallback onPressed;
+/// "**填满屏幕**"状态的容器：整块屏幕只有画面，**左滑退出**。
+///
+/// 为什么退出只能靠手势：填满状态下上下边栏都不渲染，画面里**不能**放退出按钮 ——
+/// 画面区的本地按钮会吃掉它下面那一片的点击（用户 2026-10-08 反馈过两次）。
+/// 左滑是用户指定的退出方式。
+///
+/// **两条退出路径**（都指向同一个"退出填满"）：
+/// ① 页内滑动（本组件）：起手点**不在屏幕左边缘**时，这一滑由我们识别；
+/// ② 起手在左边缘的那一滑会被 **Android 系统返回手势**吃掉，页内根本收不到指针事件
+///    （用户 2026-10-08 实测"左滑只会返回上一层"）—— 那条路由 `PlayerPage` 的
+///    `PopScope(canPop: false, ...)` 兜住：系统返回被拦下，改成退出填满屏幕。
+///
+/// 关于"这一滑会不会也发给设备"：画面上的输入层是 `Listener`（不参与手势竞技场），
+/// 所以页内的这一滑**既会退出填满、也会照常发给设备** —— 这是按用户要求做的取舍。
+class _FillScreenExit extends StatefulWidget {
+  const _FillScreenExit({required this.onExit, required this.child});
+
+  final VoidCallback onExit;
+  final Widget child;
+
+  @override
+  State<_FillScreenExit> createState() => _FillScreenExitState();
+}
+
+class _FillScreenExitState extends State<_FillScreenExit> {
+  /// 手指累计水平位移（逻辑像素，**负 = 往左**）。
+  double _dx = 0;
+
+  /// 进入后的短提示（只提示、不吃点击），两秒多后自己消失。
+  bool _hintVisible = true;
+  Timer? _hintTimer;
+
+  /// 判定为"左滑"的门槛：滑够这么多点，或者甩得够快（哪个先到都算）。
+  static const double _exitDistance = 56;
+  static const double _exitVelocity = 300;
+
+  @override
+  void initState() {
+    super.initState();
+    _hintTimer = Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) {
+        setState(() => _hintVisible = false);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _hintTimer?.cancel();
+    super.dispose();
+  }
+
+  void _onEnd(double velocity) {
+    final swipedLeft = _dx <= -_exitDistance || velocity <= -_exitVelocity;
+    _dx = 0;
+    if (swipedLeft) {
+      widget.onExit();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Material(
-      color: theme.colorScheme.surface.withValues(alpha: 0.7),
-      shape: const CircleBorder(),
-      clipBehavior: Clip.antiAlias,
-      child: IconButton(
-        tooltip: '显示标题栏',
-        onPressed: onPressed,
-        icon: const Icon(Icons.expand_more),
-        iconSize: AppIconSize.md,
-        visualDensity: VisualDensity.compact,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints(
-          minWidth: AppSpacing.xxl + AppSpacing.xs,
-          minHeight: AppSpacing.xxl + AppSpacing.xs,
-        ),
+    return GestureDetector(
+      // translucent：手势识别器与**子节点**（画面的输入层）都能拿到这次指针事件，
+      // 所以左滑既能退出填满，画面上的触摸也照发（见类注释）。
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragStart: (_) => _dx = 0,
+      onHorizontalDragUpdate: (DragUpdateDetails details) =>
+          _dx += details.delta.dx,
+      onHorizontalDragEnd: (DragEndDetails details) =>
+          _onEnd(details.primaryVelocity ?? 0),
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          widget.child,
+          if (_hintVisible)
+            IgnorePointer(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: AppSpacing.xxl),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(AppSpacing.sm),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                        vertical: AppSpacing.xs,
+                      ),
+                      child: Text('左滑退出填满屏幕'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
 }
+
 
 class _QuickBar extends StatelessWidget {
   const _QuickBar({
@@ -818,7 +956,9 @@ class _QuickBar extends StatelessWidget {
     required this.onHome,
     required this.onRecents,
     required this.onMore,
+    required this.onRotate,
     this.axis = Axis.horizontal,
+    this.onToggleChrome,
   });
 
   final bool enabled;
@@ -826,6 +966,13 @@ class _QuickBar extends StatelessWidget {
   final VoidCallback onHome;
   final VoidCallback onRecents;
   final VoidCallback onMore;
+
+  /// 旋转**本机界面**（竖屏 ⇄ 横屏）；不是被控设备那条命令。
+  final VoidCallback onRotate;
+
+  /// 横屏才给：显隐顶部浮层（横屏没有 AppBar）。**放在快捷栏里而不是浮在画面上** ——
+  /// 浮在画面上的按钮会吃掉那一片区域的点击（用户 2026-10-08 反馈）。
+  final VoidCallback? onToggleChrome;
 
   /// 横屏时用 [Axis.vertical]：竖着贴右边，把横向浪费的空间换成画面的高度。
   final Axis axis;
@@ -853,11 +1000,24 @@ class _QuickBar extends StatelessWidget {
         compact: axis == Axis.vertical,
       ),
       _QuickBarButton(
+        icon: Icons.screen_rotation_alt,
+        label: '旋转',
+        onPressed: onRotate,
+        compact: axis == Axis.vertical,
+      ),
+      _QuickBarButton(
         icon: Icons.more_horiz,
         label: '更多',
         onPressed: enabled ? onMore : null,
         compact: axis == Axis.vertical,
       ),
+      if (onToggleChrome != null)
+        _QuickBarButton(
+          icon: Icons.expand_more,
+          label: '顶栏',
+          onPressed: onToggleChrome,
+          compact: axis == Axis.vertical,
+        ),
     ];
     final isVertical = axis == Axis.vertical;
     return Material(
@@ -993,53 +1153,24 @@ class _MoreActionsSheet extends StatelessWidget {
                 ],
               ),
             ),
-            // 自动唤醒开关：设备屏幕休眠时 scrcpy 一帧都不发（"进去黑屏、点一下才有反应"
-            // 就是这个），所以这个开关默认打开，并且放在面板最上面让用户能第一时间找到。
+            // 低延迟优先（默认关）：把设备侧的**帧率上限**与**关键帧间隔**收紧。
+            // 这一行和"画质"一样会真的改设备编码参数，所以也放在同一块、并显示实测值。
+            // 依据与代价见 StreamSessionService.setLowLatencyPreferred / AGENTS §16.5。
             ListenableBuilder(
               listenable: viewModel,
               builder: (BuildContext context, _) => SwitchListTile(
-                value: viewModel.wakeOnConnect,
-                onChanged: viewModel.setWakeOnConnect,
+                value: viewModel.lowLatencyPreferred,
+                onChanged: viewModel.setLowLatencyPreferred,
                 contentPadding: const EdgeInsets.symmetric(
                   horizontal: AppSpacing.lg,
                 ),
-                title: const Text('连接后自动唤醒设备'),
-                subtitle: const Text('设备屏幕休眠时不会发画面，连上后自动按一次唤醒键'),
-              ),
-            ),
-            const Divider(height: 1),
-            // 画面填充方式：竖屏时这里也是唯一入口（横屏顶栏里另有一个图标按钮）。
-            // 只影响本地渲染与坐标换算，不动编码参数（§12.7：绝不向设备要放大）。
-            ListenableBuilder(
-              listenable: viewModel,
-              builder: (BuildContext context, _) => SwitchListTile(
-                value: viewModel.videoFitMode == VideoFitMode.cover,
-                onChanged: (bool cover) => viewModel.setVideoFitMode(
-                  cover ? VideoFitMode.cover : VideoFitMode.contain,
+                title: const Text('低延迟优先'),
+                subtitle: Text(
+                  '把帧率上限抬到 60、关键帧间隔收到 2 秒：'
+                  '帧更密（每帧少等十几毫秒）、编码器重建后最多等 2 秒就有画面。\n'
+                  '${viewModel.latencySummary}',
                 ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.lg,
-                ),
-                title: const Text('铺满屏幕'),
-                subtitle: const Text('裁掉画面上下边缘，换掉左右的黑边；不改设备那边的编码'),
-              ),
-            ),
-            const Divider(height: 1),
-            // 灵动岛/刘海避让（仅横屏有效）：iOS 横屏左右都报 ~59 点安全区，
-            // 让不让它由用户定 —— 默认避让（缺口绝不压内容），填满则铺到整块屏幕。
-            ListenableBuilder(
-              listenable: viewModel,
-              builder: (BuildContext context, _) => SwitchListTile(
-                value: viewModel.fillCutout,
-                onChanged: viewModel.setFillCutout,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.lg,
-                ),
-                title: const Text('画面填满到灵动岛'),
-                subtitle: const Text(
-                  '关闭（默认）：横屏时画面避开刘海/灵动岛那条安全区，缺口不会压住画面；'
-                  '打开：铺满整块屏幕，缺口可能遮住画面一角',
-                ),
+                isThreeLine: true,
               ),
             ),
             const Divider(height: 1),

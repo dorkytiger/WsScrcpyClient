@@ -61,14 +61,14 @@ void main() {
       final result = await web.service.save(
         settingsDto(
           serverUrl: 'https://android.dorkytiger.top/',
-          username: 'u758272094',
+          username: 'u',
           password: '',
         ),
       );
       expect(result.isError, isFalse, reason: result.isError ? result.error!.message : '');
       final saved = await web.service.load();
       expect(saved.isSuccess, isTrue);
-      expect(saved.data!.username, 'u758272094');
+      expect(saved.data!.username, 'u');
       expect(saved.data!.password, isEmpty);
     });
 

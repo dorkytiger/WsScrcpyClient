@@ -7,6 +7,7 @@ import 'package:ws_scrcpy_client/core/control/control_message_type.dart';
 import 'package:ws_scrcpy_client/core/exception/global_exception.dart';
 import 'package:ws_scrcpy_client/core/result/result.dart';
 import 'package:ws_scrcpy_client/core/stream/display_info.dart';
+import 'package:ws_scrcpy_client/core/stream/stream_initial_info.dart';
 import 'package:ws_scrcpy_client/core/stream/stream_target.dart';
 import 'package:ws_scrcpy_client/core/stream/video_settings.dart';
 import 'package:ws_scrcpy_client/core/ws/web_socket_transport.dart';
@@ -88,7 +89,7 @@ void main() {
 
   /// 按控制消息类型筛出客户端发出去的帧（首字节就是 type）。
   ///
-  /// 为什么需要它：连上之后还会发唤醒键（如果开了）与尺寸补发，直接数 `sent.length`
+  /// 为什么需要它：连上之后除了首发参数还会有尺寸补发等控制帧，直接数 `sent.length`
   /// 会让"只下发一次参数"这类断言变得又脆又难读。
   List<Uint8List> framesOfType(int type) => transport.sent
       .where((Uint8List frame) => frame.isNotEmpty && frame[0] == type)
@@ -101,6 +102,105 @@ void main() {
   /// 从 CHANGE_STREAM_PARAMETERS 帧里解出视频参数（首字节是 type，其后是参数结构）。
   VideoSettings settingsOf(Uint8List frame) =>
       VideoSettings.fromBuffer(Uint8List.sublistView(frame, 1));
+
+  /// 把夹具里服务端给的 `maxFps` 换成别的值（模拟真实服务端给低帧率的那次初始头：
+  /// 2026-10-08 20:22 实测给的是 `maxFps 24 / iFrameInterval 5`，而夹具里是 60）。
+  ///
+  /// 做法：在夹具里扫"4 字节大端 == 原 maxFps"的位置，逐个候选改掉后**用真实解析器复核**：
+  /// 只有"解析成功、maxFps 正好变成目标值、其余字段一字不变"的那一处算命中。
+  /// 这样测试里不必复制一份协议布局（唯一来源仍是 [StreamInitialInfo.parse]）。
+  Uint8List initialInfoWithMaxFps(int maxFps) {
+    final original = loadInitialInfoFixture();
+    // 夹具里有不止一个 display，服务层用的是第一个（与解析层测试一致）。
+    final before = StreamInitialInfo.parse(
+      original,
+    ).displays.first.videoSettings!;
+    if (before.maxFps == maxFps) {
+      return original;
+    }
+    for (var offset = 0; offset + 4 <= original.length; offset++) {
+      final patched = Uint8List.fromList(original);
+      ByteData.sublistView(patched).setInt32(offset, maxFps, Endian.big);
+      try {
+        final after = StreamInitialInfo.parse(
+          patched,
+        ).displays.first.videoSettings!;
+        if (after.maxFps == maxFps &&
+            after.bitrate == before.bitrate &&
+            after.iFrameInterval == before.iFrameInterval &&
+            after.displayId == before.displayId &&
+            after.bounds == before.bounds) {
+          return patched;
+        }
+      } on GlobalException {
+        // 这个位置不是 maxFps 字段（改坏了解析）——继续找。
+      }
+    }
+    throw StateError('夹具里没找到 maxFps 字段（夹具被换过了？）');
+  }
+
+  test('★ 低延迟优先：把设备侧帧率抬上去、关键帧间隔收下来，且立刻补发一条', () async {
+    await service.start(target);
+    // 服务端给 maxFps 24 / iFrameInterval 10（真实出现过的那组）：两个方向都覆盖
+    // —— maxFps 要**抬**到 60，iFrameInterval 要**收**到 2。
+    transport.emit(initialInfoWithMaxFps(24));
+    await pumpEventQueue();
+    // UI 视口尺寸要**先报过**：开关的"立刻补发"和 setBoundsMode 一样，是按当前视口重算的
+    // （真实路径上用户能点到这个开关时，页面早就报过尺寸了）。
+    service.applyViewportBounds(width: 1898, height: 853);
+
+    final before = settingsOf(
+      framesOfType(ControlMessageType.changeStreamParameters.code).single,
+    );
+    expect(before.maxFps, 24, reason: '夹具已被改成低帧率那组');
+    expect(before.iFrameInterval, 10);
+    expect(service.lowLatencyPreferred, isFalse, reason: '默认必须是关的');
+
+    // 打开：必须**立刻**补发一条（用户点了就要马上生效；套路同 setBoundsMode）。
+    final on = service.setLowLatencyPreferred(true);
+    expect(on.isSuccess, isTrue);
+    var frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    expect(frames, hasLength(2), reason: '打开开关必须马上补发一条');
+    final tuned = settingsOf(frames.last);
+    expect(tuned.maxFps, StreamSessionService.lowLatencyMaxFps);
+    expect(tuned.iFrameInterval, StreamSessionService.lowLatencyIFrameInterval);
+    // 其余字段一个都不能动（回显服务端值的纪律，§6.2 的反馈循环教训）。
+    expect(tuned.bitrate, before.bitrate);
+    expect(tuned.bounds, before.bounds);
+    expect(tuned.sendFrameMeta, isFalse);
+
+    // 关掉：回到服务端给的值，也要立刻补发。
+    expect(service.setLowLatencyPreferred(false).isSuccess, isTrue);
+    frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    expect(frames, hasLength(3));
+    final restored = settingsOf(frames.last);
+    expect(restored.maxFps, 24);
+    expect(restored.iFrameInterval, 10);
+
+    // 幂等：状态没变就一条都不发（否则服务端会白重建一次编码器）。
+    expect(service.setLowLatencyPreferred(false).isSuccess, isTrue);
+    expect(
+      framesOfType(ControlMessageType.changeStreamParameters.code),
+      hasLength(3),
+    );
+  });
+
+  test('★ 低延迟优先只"收紧"不"放松"：服务端已经给 60fps 时不动帧率', () async {
+    await service.start(target);
+    transport.emit(loadInitialInfoFixture()); // 夹具：maxFps 60 / iFrameInterval 10
+    await pumpEventQueue();
+    service.applyViewportBounds(width: 1898, height: 853);
+
+    service.setLowLatencyPreferred(true);
+    final frames = framesOfType(ControlMessageType.changeStreamParameters.code);
+    final tuned = settingsOf(frames.last);
+    expect(tuned.maxFps, 60, reason: '服务端给的 60 不比我们要的低，不该被改');
+    expect(
+      tuned.iFrameInterval,
+      StreamSessionService.lowLatencyIFrameInterval,
+      reason: '服务端给的 10 秒太长，要收到 2 秒',
+    );
+  });
 
   test('初始信息头 → 解析出设备与分辨率，并下发一次视频参数', () async {
     await service.start(target);
@@ -220,46 +320,32 @@ void main() {
     );
   });
 
-  test('唤醒是可选项：默认关，打开后发一次 KEYCODE_WAKEUP', () async {
-    // 默认关：真实服务端 bundle 里网页端根本不发唤醒键，黑屏的正解是"只发一次参数 +
-    // 回显服务端值"，唤醒只是给"屏幕休眠导致不出帧"的设备留的可选开关。
-    expect(service.wakeOnConnect, isFalse);
+  test('★ 再也不发唤醒键：整条链路没有任何 KEYCODE_WAKEUP', () async {
+    // 2026-10-08 用户要求删掉"连接后自动唤醒设备"与手动唤醒：
+    // 加它的前提（"设备屏幕休眠 → 服务端不出帧 → 黑屏"）是**误判** ——
+    // 真实服务端网页端根本不发唤醒键（`WAKEUP` 只命中常量表），黑屏的正解是
+    // "参数只下发一次 + 回显服务端值"（见 AGENTS §12.5）。
     await service.start(target);
+    transport.emit(loadInitialInfoFixture());
+    await pumpEventQueue();
+
+    final keyCodes = framesOfType(ControlMessageType.keycode.code);
+    expect(keyCodes, isEmpty, reason: '连上之后不该有任何按键帧');
+    expect(
+      transport.sent.any(
+        (Uint8List frame) =>
+            frame.length > 1 &&
+            frame[0] == ControlMessageType.keycode.code &&
+            keyCodeOf(frame) == AndroidKeyCode.wakeup,
+      ),
+      isFalse,
+      reason: '整条连接里不该出现 KEYCODE_WAKEUP',
+    );
+
+    // 再收一次初始信息头（历史上正是这条路径会补发唤醒键）也不该有按键帧。
     transport.emit(loadInitialInfoFixture());
     await pumpEventQueue();
     expect(framesOfType(ControlMessageType.keycode.code), isEmpty);
-
-    // 打开开关 → 立刻补发一次（用户在面板里刚点的开关要马上有反馈）。
-    service.wakeOnConnect = true;
-    final keyCodes = framesOfType(ControlMessageType.keycode.code);
-    expect(keyCodes, hasLength(2), reason: '唤醒键应该是 down + up 两条');
-    expect(keyCodeOf(keyCodes[0]), AndroidKeyCode.wakeup);
-    expect(keyCodeOf(keyCodes[1]), AndroidKeyCode.wakeup);
-    // 第 1 字节是动作：0=down，1=up。
-    expect(keyCodes[0][1], 0);
-    expect(keyCodes[1][1], 1);
-
-    // 重复收到初始信息头不会再发一次唤醒（每条连接只发一次）。
-    transport.emit(loadInitialInfoFixture());
-    await pumpEventQueue();
-    expect(framesOfType(ControlMessageType.keycode.code), hasLength(2));
-  });
-
-  test('开了自动唤醒时：参数下发成功后自动发一次唤醒键', () async {
-    service.wakeOnConnect = true;
-    await service.start(target);
-    transport.emit(loadInitialInfoFixture());
-    await pumpEventQueue();
-
-    expect(framesOfType(ControlMessageType.keycode.code), hasLength(2));
-    expect(
-      keyCodeOf(framesOfType(ControlMessageType.keycode.code)[0]),
-      AndroidKeyCode.wakeup,
-    );
-  });
-
-  test('未连接时唤醒返回失败而不是抛异常', () {
-    expect(service.wakeDevice().isError, isTrue);
   });
 
   test('视频帧按 Annex-B 原样转发到 videoFrames 流，并累计计数', () async {
@@ -317,7 +403,7 @@ void main() {
 
     final result = service.pressNavigationKey(NavigationKey.home);
     expect(result.isSuccess, isTrue);
-    // 默认不开唤醒，所以 keycode 帧只有 Home 的 down/up。
+    // 客户端不会再自动发任何按键（唤醒功能已删除），所以 keycode 帧只有 Home 的 down/up。
     final keyCodes = framesOfType(ControlMessageType.keycode.code);
     expect(keyCodes, hasLength(2));
     expect(keyCodeOf(keyCodes[0]), NavigationKey.home.keyCode);

@@ -19,6 +19,7 @@ void PixelBufferStore::PublishDecoded(std::vector<uint8_t>* scratch) {
   latest_.swap(*scratch);
   dirty_ = true;
   published_ = true;
+  latency_.MarkPublished();
 }
 
 size_t PixelBufferStore::Resize(uint32_t width, uint32_t height,
@@ -43,6 +44,7 @@ size_t PixelBufferStore::Resize(uint32_t width, uint32_t height,
 const FlutterDesktopPixelBuffer* PixelBufferStore::CopyLatest() {
   raster_callbacks_.fetch_add(1);
   std::shared_ptr<Frame> frame;
+  bool handed_new_frame = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (current_ == nullptr) {
@@ -53,8 +55,14 @@ const FlutterDesktopPixelBuffer* PixelBufferStore::CopyLatest() {
     if (dirty_ && latest_.size() == current_->pixels.size()) {
       std::memcpy(current_->pixels.data(), latest_.data(), latest_.size());
       dirty_ = false;
+      handed_new_frame = true;
     }
     frame = current_;  // 留一份引用，交给下面的 Grant
+  }
+  // 只有"这次真的把一帧新的交出去"才计一个延迟样本（引擎按 vsync 来取，
+  // 没有新帧的空取不属于这一帧的延迟，见 present_latency.h）。
+  if (handed_new_frame) {
+    latency_.MarkPickedUp();
   }
 
   // 每次回调一张 Grant：descriptor 指向 Grant 自己，release_callback 里把它删掉。
@@ -96,4 +104,12 @@ bool PixelBufferStore::has_published() const {
 
 uint64_t PixelBufferStore::raster_callbacks() const {
   return raster_callbacks_.load();
+}
+
+uint64_t PixelBufferStore::present_latency_samples() const {
+  return latency_.samples();
+}
+
+uint64_t PixelBufferStore::present_latency_sum_us() const {
+  return latency_.sum_us();
 }

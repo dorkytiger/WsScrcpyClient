@@ -170,89 +170,191 @@ void CheckPack() {
 // **传统 OpenSharedResource**（其报错串 `-Failed to open share handle, ` /
 // `Invalid texture parameters in share handle texture.`）。这里把同一条 API 路径离线跑通，
 // 真机黑屏的概率就大幅下降。
-void CheckCrossDeviceSharing(uint64_t handle_value) {
-  if (handle_value == 0) {
-    Expect(false, "共享句柄非 0");
-    return;
+// 找一块适配器（按 LUID）。
+//
+// 为什么要按 LUID 找：引擎侧（ANGLE）打开我们共享句柄的那个设备，只可能在**我们建纹理
+// 那块适配器**上成功——传统 DXGI 共享句柄不能跨适配器打开（真机实测同适配器 3/3、
+// 跨适配器 0/6，见 AGENTS.md §12.8）。所以自测必须用"引擎的 LUID"来挑设备，
+// 而不是 `D3D11CreateDevice(nullptr)`（那给的是系统默认适配器，很可能是**另一块**，
+// 于是这条检查会变成"在测跨适配器失败"，与真实引擎的行为无关）。
+IDXGIAdapter1* FindAdapterByLuid(uint64_t luid) {
+  IDXGIFactory1* factory = nullptr;
+  if (FAILED(::CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                                  reinterpret_cast<void**>(&factory))) ||
+      factory == nullptr) {
+    return nullptr;
   }
+  IDXGIAdapter1* found = nullptr;
+  for (UINT index = 0;; ++index) {
+    IDXGIAdapter1* adapter = nullptr;
+    if (factory->EnumAdapters1(index, &adapter) != S_OK || adapter == nullptr) {
+      break;
+    }
+    DXGI_ADAPTER_DESC1 description = {};
+    const bool matches =
+        SUCCEEDED(adapter->GetDesc1(&description)) &&
+        ws_scrcpy::PresenterOptions::PackLuid(description.AdapterLuid.LowPart,
+                                              description.AdapterLuid.HighPart) ==
+            luid;
+    if (matches) {
+      found = adapter;
+      break;
+    }
+    adapter->Release();
+  }
+  factory->Release();
+  return found;
+}
+
+// 在指定适配器上建一个设备（模拟引擎侧），并报告它能不能打开我们的共享句柄。
+bool TryOpenSharedHandleOnAdapter(IDXGIAdapter1* adapter, uint64_t handle_value,
+                                  const std::string& what) {
   ID3D11Device* device = nullptr;
   ID3D11DeviceContext* context = nullptr;
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1,
                                       D3D_FEATURE_LEVEL_11_0};
   D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_11_0;
   HRESULT result = ::D3D11CreateDevice(
-      nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-      levels, 2, D3D11_SDK_VERSION, &device, &obtained, &context);
+      adapter, adapter != nullptr ? D3D_DRIVER_TYPE_UNKNOWN
+                                  : D3D_DRIVER_TYPE_HARDWARE,
+      nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION,
+      &device, &obtained, &context);
   if (result == E_INVALIDARG) {
-    result = ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels + 1, 1,
-                                 D3D11_SDK_VERSION, &device, &obtained, &context);
+    result = ::D3D11CreateDevice(
+        adapter, adapter != nullptr ? D3D_DRIVER_TYPE_UNKNOWN
+                                    : D3D_DRIVER_TYPE_HARDWARE,
+        nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels + 1, 1,
+        D3D11_SDK_VERSION, &device, &obtained, &context);
   }
-  Expect(SUCCEEDED(result) && device != nullptr,
-         "模拟引擎侧：能建第二个 D3D11 设备");
   if (FAILED(result) || device == nullptr) {
-    return;
+    std::printf("  [SKIP] %s：建不出第二个 D3D11 设备\n", what.c_str());
+    if (context != nullptr) {
+      context->Release();
+    }
+    return false;
   }
 
   ID3D11Texture2D* texture = nullptr;
   result = device->OpenSharedResource(
       reinterpret_cast<HANDLE>(handle_value), __uuidof(ID3D11Texture2D),
       reinterpret_cast<void**>(&texture));
-  Expect(SUCCEEDED(result) && texture != nullptr,
-         "另一设备能用传统 OpenSharedResource 打开我们的共享句柄（引擎/ANGLE 走的就是这条）");
-  if (!texture) {
+  const bool opened = SUCCEEDED(result) && texture != nullptr;
+
+  if (opened) {
     D3D11_TEXTURE2D_DESC description = {};
-    static_cast<void>(description);
-    device->Release();
-    context->Release();
-    return;
-  }
+    texture->GetDesc(&description);
+    Expect(description.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
+           "打开后的纹理格式是 R8G8B8A8_UNORM（引擎只接受 GL_RGBA8，BGRA 会被拒收）");
+    Expect((description.MiscFlags & D3D11_RESOURCE_MISC_SHARED) != 0 ||
+               (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) !=
+                   0 ||
+               (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0,
+           "打开后的纹理是共享资源");
 
-  D3D11_TEXTURE2D_DESC description = {};
-  texture->GetDesc(&description);
-  Expect(description.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
-         "打开后的纹理格式是 R8G8B8A8_UNORM（引擎只接受 GL_RGBA8，BGRA 会被拒收）");
-  Expect((description.MiscFlags & D3D11_RESOURCE_MISC_SHARED) != 0 ||
-             (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0 ||
-             (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0,
-         "打开后的纹理是共享资源");
-
-  IDXGIKeyedMutex* mutex = nullptr;
-  result = texture->QueryInterface(__uuidof(IDXGIKeyedMutex),
-                                   reinterpret_cast<void**>(&mutex));
-  Expect(SUCCEEDED(result) && mutex != nullptr,
-         "共享纹理可以取出 IDXGIKeyedMutex（默认同步方式）");
-  if (mutex != nullptr) {
-    const HRESULT acquire = mutex->AcquireSync(0, 1000);
-    Expect(acquire == S_OK, "消费侧能 AcquireSync(0)");
-    if (acquire == S_OK) {
-      // 消费侧真读一次：拷回 CPU 证明跨设备内容可用。
-      D3D11_TEXTURE2D_DESC staging_description = description;
-      staging_description.Usage = D3D11_USAGE_STAGING;
-      staging_description.BindFlags = 0;
-      staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      staging_description.MiscFlags = 0;
-      ID3D11Texture2D* staging = nullptr;
-      if (SUCCEEDED(device->CreateTexture2D(&staging_description, nullptr,
-                                            &staging))) {
-        context->CopyResource(staging, texture);
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        Expect(SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)),
-               "消费侧能读回共享纹理（跨设备拷贝成功）");
-        if (mapped.pData != nullptr) {
-          context->Unmap(staging, 0);
+    IDXGIKeyedMutex* mutex = nullptr;
+    result = texture->QueryInterface(__uuidof(IDXGIKeyedMutex),
+                                     reinterpret_cast<void**>(&mutex));
+    Expect(SUCCEEDED(result) && mutex != nullptr,
+           "共享纹理可以取出 IDXGIKeyedMutex（默认同步方式）");
+    if (mutex != nullptr) {
+      const HRESULT acquire = mutex->AcquireSync(0, 1000);
+      Expect(acquire == S_OK, "消费侧能 AcquireSync(0)");
+      if (acquire == S_OK) {
+        // 消费侧真读一次：拷回 CPU 证明跨设备内容可用。
+        D3D11_TEXTURE2D_DESC staging_description = description;
+        staging_description.Usage = D3D11_USAGE_STAGING;
+        staging_description.BindFlags = 0;
+        staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        staging_description.MiscFlags = 0;
+        ID3D11Texture2D* staging = nullptr;
+        if (SUCCEEDED(device->CreateTexture2D(&staging_description, nullptr,
+                                              &staging))) {
+          context->CopyResource(staging, texture);
+          D3D11_MAPPED_SUBRESOURCE mapped = {};
+          Expect(SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)),
+                 "消费侧能读回共享纹理（跨设备拷贝成功）");
+          if (mapped.pData != nullptr) {
+            context->Unmap(staging, 0);
+          }
+          staging->Release();
+        } else {
+          Expect(false, "创建 staging 纹理");
         }
-        staging->Release();
-      } else {
-        Expect(false, "创建 staging 纹理");
+        mutex->ReleaseSync(0);
       }
-      mutex->ReleaseSync(0);
+      mutex->Release();
     }
-    mutex->Release();
+    texture->Release();
   }
-  texture->Release();
+
   device->Release();
   context->Release();
+  return opened;
+}
+
+// 引擎侧取纹理的两条路径，**都必须能证明**：
+//   ① 同一块适配器（我们按引擎 LUID 对齐后引擎所处的状态）→ 必须打开成功；
+//   ② 另一块适配器 → 必须打不开（这就是默认模式 kAuto 拒绝建 GPU 路的理由）。
+void CheckCrossDeviceSharing(ws_scrcpy::D3d11VideoPresenter* presenter) {
+  const uint64_t handle_value = presenter->shared_handle_value();
+  if (handle_value == 0) {
+    Expect(false, "共享句柄非 0");
+    return;
+  }
+  const uint64_t our_luid = presenter->device_adapter_luid();
+  Expect(our_luid != 0, "能读到本次设备的适配器 LUID（用来模拟引擎那块）");
+
+  // ① 同适配器（模拟"引擎在我们这块"）
+  IDXGIAdapter1* same = FindAdapterByLuid(our_luid);
+  Expect(same != nullptr, "能按 LUID 找回本次设备那块适配器");
+  if (same != nullptr) {
+    Expect(TryOpenSharedHandleOnAdapter(
+               same, handle_value,
+               "同适配器设备打开共享句柄（引擎对齐后的状态）"),
+           "**同适配器**：另一设备能用传统 OpenSharedResource 打开我们的共享句柄"
+           "（引擎/ANGLE 走的就是这条，也是 kAuto 成立的前提）");
+    same->Release();
+  }
+
+  // ② 另一块适配器（模拟"引擎在别的 GPU 上"）——预期**打不开**，这不是失败，
+  //    而是 kAuto 必须拒绝的证据（真机第三次全黑就是这个组合）。
+  IDXGIAdapter1* other = nullptr;
+  IDXGIFactory1* factory = nullptr;
+  if (SUCCEEDED(::CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                                     reinterpret_cast<void**>(&factory))) &&
+      factory != nullptr) {
+    for (UINT index = 0;; ++index) {
+      IDXGIAdapter1* adapter = nullptr;
+      if (factory->EnumAdapters1(index, &adapter) != S_OK || adapter == nullptr) {
+        break;
+      }
+      DXGI_ADAPTER_DESC1 description = {};
+      if (SUCCEEDED(adapter->GetDesc1(&description)) &&
+          ws_scrcpy::PresenterOptions::PackLuid(
+              description.AdapterLuid.LowPart,
+              description.AdapterLuid.HighPart) != our_luid) {
+        other = adapter;
+        break;
+      }
+      adapter->Release();
+    }
+    factory->Release();
+  }
+  if (other != nullptr) {
+    const bool opened = TryOpenSharedHandleOnAdapter(
+        other, handle_value, "另一块适配器设备打开共享句柄（预期失败）");
+    Expect(!opened,
+           "**跨适配器**：另一块 GPU 上的设备打不开这个句柄"
+           "（实测 0/6；这正是 kAuto 拒绝建 GPU 路的依据，见 AGENTS §12.8）");
+    if (opened) {
+      std::printf(
+          "    [注意] 本机跨适配器也能打开句柄——那说明这块 GPU/驱动支持跨适配器共享，\n"
+          "           kAuto 的保守策略在本机偏严（仍然安全，只是没用上 GPU 路）。\n");
+    }
+    other->Release();
+  } else {
+    std::printf("  [SKIP] 本机只有一块适配器，跨适配器那格无从验证\n");
+  }
 }
 
 // GPU：一帧从上传到画出的完整数值比对。
@@ -365,6 +467,10 @@ int main() {
 
   std::printf("==== GPU 呈现（D3D11 共享纹理 + 着色器） ====\n");
   ws_scrcpy::PresenterOptions options;
+  // 这个自测没有真引擎，它自己建第二个 D3D11 设备来模拟 ANGLE 的 OpenSharedResource；
+  // 所以这里必须用**强制**模式：默认的 kAuto 要求"与引擎同适配器"（按 LUID 比对），
+  // 自测环境里报不出引擎适配器——那正是下面第 3 条要断言的行为。
+  options.mode = ws_scrcpy::PresenterOptions::Mode::kForceOn;
   options.keyed_mutex = true;
   options.nth_handle = false;
   ws_scrcpy::D3d11VideoPresenter presenter;
@@ -372,12 +478,14 @@ int main() {
     std::printf("  [SKIP] GPU 部分未执行：%s\n", presenter.LastError().c_str());
     std::printf("         （PackNv12 的检查已经跑完；GPU 部分需要在有 D3D11 设备的会话里跑）\n");
   } else {
-    std::printf("  适配器：%s，共享句柄：0x%llX，同步：%s\n",
+    std::printf("  适配器：%s（LUID 0x%llX），共享句柄：0x%llX，同步：%s\n",
                 presenter.device_name().c_str(),
+                static_cast<unsigned long long>(presenter.device_adapter_luid()),
                 static_cast<unsigned long long>(presenter.shared_handle_value()),
                 presenter.keyed_mutex_enabled() ? "keyed-mutex(key 0)" : "无");
-    // 0) 引擎侧取纹理的方式（跨设备 OpenSharedResource + keyed mutex）
-    CheckCrossDeviceSharing(presenter.shared_handle_value());
+    // 0) 引擎侧取纹理的方式（跨设备 OpenSharedResource + keyed mutex）：
+    //    同适配器必须成功、跨适配器必须失败（后者就是 kAuto 拒绝建 GPU 路的依据）。
+    CheckCrossDeviceSharing(&presenter);
     // 1) 与创建尺寸一致
     CheckGpuFrame(&presenter, 1280, 720, 1280, 1, false);
     // 2) 行跨距带对齐（MF 常见：stride 大于 width）
@@ -389,6 +497,54 @@ int main() {
     // 5) 极小奇数尺寸（边界：物理尺寸要向上对齐、色度最后一行要复制）
     CheckGpuFrame(&presenter, 3, 3, 8, 5, true);
     CheckGpuFrame(&presenter, 2, 2, 2, 6, true);
+
+    // ---- 2026-10-08 新增：呈现路的"选适配器"规则（不黑屏这条不变量的门禁）----
+    //
+    // 背景：传统 DXGI 共享句柄不能跨适配器打开（run_d3d11_adapter_probe.cmd：
+    // 同适配器 3/3、跨适配器 0/6），而真机第三次的"已发布 67 帧却全黑"就是这个机制。
+    // 所以默认模式（kAuto）必须满足："证明不了与引擎同适配器，就**不许**建 GPU 路"。
+    {
+      const uint64_t our_luid = presenter.device_adapter_luid();
+      Expect(our_luid != 0, "能读到本次设备的适配器 LUID（LUID 比对的前提）");
+
+      // 3a) kAuto + 拿不到引擎适配器 → 必须拒绝（否则就是拿黑屏赌运气）
+      ws_scrcpy::PresenterOptions auto_unknown;
+      auto_unknown.mode = ws_scrcpy::PresenterOptions::Mode::kAuto;
+      ws_scrcpy::D3d11VideoPresenter refused;
+      const bool created_without_engine = refused.Create(1280, 720, auto_unknown);
+      Expect(!created_without_engine,
+             "kAuto + 不知道引擎适配器 → 拒绝建 GPU 路（回落 CPU，不赌黑屏）");
+      if (!created_without_engine) {
+        std::printf("    拒绝原因：%s\n", refused.LastError().c_str());
+      }
+
+      // 3b) kAuto + 引擎 LUID 与我们这块一致 → 必须建得起来，并报"匹配=是"
+      ws_scrcpy::PresenterOptions auto_match;
+      auto_match.mode = ws_scrcpy::PresenterOptions::Mode::kAuto;
+      auto_match.have_engine_adapter = true;
+      auto_match.engine_adapter_luid = our_luid;
+      ws_scrcpy::D3d11VideoPresenter matched;
+      if (matched.Create(1280, 720, auto_match)) {
+        Expect(matched.engine_adapter_matched(),
+               "kAuto + 引擎 LUID 与本次设备一致 → 建得起来且报『匹配=是』");
+        Expect(matched.device_adapter_luid() == our_luid,
+               "kAuto 下选到的就是引擎那块适配器（LUID 相等）");
+        matched.Release();
+      } else {
+        Expect(false, std::string("kAuto + 引擎 LUID 一致时应当建得起来，实际失败：") +
+                          matched.LastError());
+      }
+
+      // 3c) kAuto + 引擎 LUID 是**另一块** → 必须拒绝（跨适配器共享句柄打不开）
+      ws_scrcpy::PresenterOptions auto_other;
+      auto_other.mode = ws_scrcpy::PresenterOptions::Mode::kAuto;
+      auto_other.have_engine_adapter = true;
+      auto_other.engine_adapter_luid = our_luid ^ 0xFFFFFFFFull;  // 保证不是同一块
+      ws_scrcpy::D3d11VideoPresenter other;
+      Expect(!other.Create(1280, 720, auto_other),
+             "kAuto + 引擎在另一块适配器 → 拒绝建 GPU 路（跨适配器必然黑屏）");
+    }
+
     presenter.Release();
     Expect(!presenter.ready(), "Release 之后 ready() 为假");
     presenter.Release();  // 可重复调用

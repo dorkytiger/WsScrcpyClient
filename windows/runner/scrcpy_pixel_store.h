@@ -10,6 +10,8 @@
 #include <mutex>
 #include <vector>
 
+#include "present_latency.h"
+
 // 交给 Flutter 引擎读取的像素缓冲（CPU 路线，`flutter::PixelBufferTexture`）。
 //
 // 为什么单独抽成一个编译单元（不再藏在 scrcpy_video_decoder.cpp 的匿名命名空间里）：
@@ -62,6 +64,11 @@ class PixelBufferStore {
   //     （第 4 方证据见 AGENTS.md §12.8；这也是 Windows 从 CPU 像素路换到 GPU 共享纹理路的依据）。
   uint64_t raster_callbacks() const;
 
+  // "发布 → 引擎取走"的延迟样本数与累计微秒数（口径见 present_latency.h；
+  // 与 GPU 路的 D3d11VideoPresenter 用的是同一份实现，所以两条路可以直接对比）。
+  uint64_t present_latency_samples() const;
+  uint64_t present_latency_sum_us() const;
+
  private:
   struct Frame {
     std::vector<uint8_t> pixels;
@@ -81,6 +88,8 @@ class PixelBufferStore {
   bool dirty_ = false;              // latest_ 是否比 current_ 新
   bool published_ = false;          // 是否至少发布过一帧
   std::atomic<uint64_t> raster_callbacks_{0};  // 引擎来取缓冲的次数
+  // "发布 → 引擎取走"的延迟（两条呈现路共用同一份实现，见 present_latency.h）。
+  PresentLatencyMeter latency_;
 };
 
 #endif  // RUNNER_SCRCPY_PIXEL_STORE_H_

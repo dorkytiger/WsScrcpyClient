@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "present_latency.h"
+
 // Windows 端的 GPU 呈现路径：把解码器输出的 NV12 直接交给 GPU 转成 RGBA，
 // 再以 DXGI 共享纹理的形式交给 Flutter 引擎（`flutter::GpuSurfaceTexture`）。
 //
@@ -39,9 +41,11 @@
 // 我们写入前 `AcquireSync(0, timeout)`、写完 `ReleaseSync(0)`。取不到锁就**丢掉这一帧**
 // （宁可掉帧也不把解码线程堵死）。若真机上这条路表现异常，可用环境变量关掉它做 A/B：
 //   WS_SCRCPY_GPU=0            完全回退 CPU 路（不建 D3D11 设备）
+//   WS_SCRCPY_GPU=1            强制走 GPU 路（连跨适配器也照建，A/B 用）
 //   WS_SCRCPY_GPU_SYNC=none    用普通 SHARED 纹理（无 keyed mutex）
 //   WS_SCRCPY_GPU_HANDLE=nth   改用 `IDXGIResource1::CreateSharedHandle`（NTHANDLE）
-// 三个开关都会被写进日志，排查时先看那条 "GPU 呈现已就绪" 日志。
+//   WS_SCRCPY_GPU_ADAPTER=…    显式指定适配器（索引或 intel/amd/nvidia 子串）
+// 所有开关都会被写进日志，排查时先看那条 "GPU 呈现已就绪" 日志。
 //
 // 线程模型：
 //   - `Create` / `Resize` / `PublishNv12` / `Release` 都在**解码线程**上调用（D3D11
@@ -64,16 +68,47 @@ struct Nv12Frame {
 };
 
 /// GPU 呈现路径的可选开关（默认值即推荐值；环境变量可覆盖，见文件头注释）。
+///
+/// `Mode` 是三态（2026-10-08 新增，起因见 AGENTS.md §12.8 的"遗留与下一步"）：
+///   - `kAuto`（默认）：**只在能证明"与引擎同一块适配器"时才建 GPU 路**。
+///     依据是一条实测结论 + 一条新拿到的 API：
+///     ① 传统 DXGI 共享句柄**不能跨适配器打开**（`tools\run_d3d11_adapter_probe.cmd`：
+///        同适配器 3/3 成功、跨适配器 0/6），而引擎（ANGLE）只会在**自己那块**适配器上
+///        打开我们的句柄——所以"两边不同一块"就是真机第三次"已发布 67 帧但全黑"的机制；
+///     ② 引擎用哪块适配器现在可以直接问出来：
+///        `FlutterDesktopPluginRegistrarGetGraphicsAdapter`（本机 flutter_windows.dll
+///        已导出，见 dumpbin /exports）。
+///     于是"同适配器"从**按厂商猜核显**变成了**可比对的前提**；证明不了就不建 GPU 路，
+///     回落 CPU 像素缓冲（宁可用 CPU 路，也绝不再交一次黑屏）。
+///   - `kForceOn`：不管引擎在哪块都建（A/B 与排障用；跨适配器时画面会全黑）。
+///   - `kForceOff`：完全不建 D3D11 设备，直接走 CPU 路。
 struct PresenterOptions {
-  bool enabled = false;     // 是否启用 GPU 路（false = 直接用 CPU 路；真机第三次全黑后默认关）
+  enum class Mode { kAuto, kForceOn, kForceOff };
+
+  Mode mode = Mode::kAuto;
   bool keyed_mutex = true;  // 共享纹理是否带 keyed mutex 同步
   bool nth_handle = false;  // 是否改用 NTHANDLE（默认传统 GetSharedHandle）
 
-  /// 选哪块适配器：空串/`auto` = 优先核显；`0`/`1`… = 索引；`intel`/`amd`/`nvidia` = 按名字。
+  /// 选哪块适配器：空串/`auto` = 按引擎适配器 / 核显启发式；
+  /// `0`/`1`… = 索引；`intel`/`amd`/`nvidia` = 按名字子串（显式指定时优先于引擎匹配）。
   std::string adapter_hint = "auto";
+
+  /// 引擎（Flutter/ANGLE）渲染适配器的 LUID：由通道层问引擎要，再传进来
+  /// （见 scrcpy_video_decoder.h 的 EngineRenderingAdapter）。未知时为 false。
+  ///
+  /// 为什么是"传进来"而不是在本类里问引擎：本文件刻意**不依赖 Flutter 的 C++ wrapper**，
+  /// 这样 `tools/d3d11_present_test.cpp` 能直接链接本类做离线数值自测（见 AGENTS.md §12.3）。
+  bool have_engine_adapter = false;
+  uint64_t engine_adapter_luid = 0;
 
   /// 从环境变量读覆盖项（WS_SCRCPY_GPU / _SYNC / _HANDLE / _ADAPTER）。
   static PresenterOptions FromEnvironment();
+
+  /// 把 LUID 的两个 32 位分量打包成 64 位（本头文件不引 windows.h）。
+  static uint64_t PackLuid(uint32_t low_part, int32_t high_part) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(high_part)) << 32) |
+           static_cast<uint64_t>(low_part);
+  }
 };
 
 class D3d11VideoPresenter {
@@ -110,6 +145,23 @@ class D3d11VideoPresenter {
   /// 适配器名（日志用；拿不到时是空串）。
   std::string device_name() const;
 
+  /// 本次用的适配器**是否就是引擎渲染适配器**（`kAuto` 成立的前提）。
+  ///
+  /// 为什么必须能读到：真机第三次"已发布 N 帧但全黑"的唯一解释就是两边不在同一块适配器上，
+  /// 所以"匹配：是/否"要和"呈现路径：GPU/CPU"一起进日志——否则下次黑屏又要从头猜。
+  bool engine_adapter_matched() const;
+
+  /// 引擎渲染适配器的名字（只有引擎匹配成功时才有值；日志用）。
+  std::string engine_adapter_name() const;
+
+  /// 本次真正用到的适配器 LUID（自测里当"引擎那块"来用；也是日志里的对齐依据）。
+  uint64_t device_adapter_luid() const;
+
+  /// "发布 → 引擎取走"的延迟样本数与累计微秒数（口径见 present_latency.h，
+  /// 与 CPU 像素缓冲路共用同一份实现，因此两条路可以直接对比）。
+  uint64_t present_latency_samples() const;
+  uint64_t present_latency_sum_us() const;
+
   /// 最近一次失败的可读原因。
   std::string LastError() const;
 
@@ -134,6 +186,16 @@ class D3d11VideoPresenter {
 
   /// 仅自测用：把当前共享纹理拷回 CPU（紧凑 RGBA8888，物理尺寸）。
   bool ReadbackForTest(std::vector<uint8_t>* out);
+
+  /// **首帧内容自检**（解码线程调一次）：把共享纹理回读一遍，报"有没有画面"。
+  ///
+  /// 为什么要它：2026-10-08 那次 GPU 路的表现是"引擎匹配=是、引擎也一直在取帧、
+  /// 但屏幕全黑"——光看计数分不清是**我们没画进去**还是**引擎没消费**。
+  /// 这个自检把两种可能一刀切开：
+  ///   - 自检说"有画面"（非黑比例高）→ 纹理里确实有内容，问题在引擎侧消费/合成；
+  ///   - 自检说"全黑" → 问题在我们这一侧（着色器/上传/尺寸），不用去猜引擎。
+  /// 返回可直接进日志的一句话；拿不到回读时返回错误原因。
+  std::string FirstFrameContentReport();
 
   /// 仅自测用：把任意跨距的 NV12 重排成 D3D11 `UpdateSubresource` 需要的紧凑布局
   /// （Y 平面 physical_height 行，UV 平面 physical_height/2 行，行跨距都是 physical_width，

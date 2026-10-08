@@ -1,9 +1,11 @@
-# GitHub Actions（★ 默认**不自动跑**，只在手动 workflow_dispatch 时跑）
+# GitHub Actions（★ 2026-10-07 起：**推 `v*` tag 自动发 Release 到 GitHub 的版本发布页**）
 #
-# 为什么：GitHub 私有仓库的 Actions 分钟数要吃每月免费额度，而这个仓库改用**自托管
-# Forgejo runner**（`.forgejo/workflows/build.yml`，那才是当前在用的 CI）。
-# 这份文件留着是为了"以后想切到 GitHub"时不用重写 —— 触发方式全部准备好，
-# 想启用就把下面 `on:` 里注释掉的 push / pull_request / tags 恢复，并删掉本段说明。
+# 与 Forgejo 那份的分工：
+#   · Forgejo（`.forgejo/workflows/build.yml`，自托管、不花额度）= 日常 CI + Android/Web 产物；
+#   · **GitHub（这份）= 发全平台版本**：只有它能出 iOS / macOS（`macos-latest`）与
+#     Windows（`windows-latest`），并且用自带 `GITHUB_TOKEN` 建 Release（不用另配凭据）。
+# 触发：`push: tags: ['v*']`（分支推送**刻意不跑**，省额度；想让分支也跑就把下面
+# `branches:` 与 `pull_request:` 两段取消注释 —— 注意 macOS runner 是 **10× 计费**）。
 # 详细对照见 docs/ci.md §7。
 #
 # 它有 Forgejo 那份没有的东西：**iOS 与 macOS**（GitHub 自带 macos-latest），
@@ -30,11 +32,11 @@
 name: build
 
 on:
-  # ★ 想全量启用就把下面三段取消注释（当前刻意只留手动触发，避免烧 GitHub 额度）。
-  # push:
-  #   # 默认分支可能是 master 也可能是 main，两个都收，避免"推了却不触发"。
-  #   branches: [master, main]
-  #   tags: ['v*']
+  # ★ 只开 tag 触发：推 `v1.2.3` 就构建五端 + 建 Release。
+  # 想让每次分支推送也验证，把下面 `branches:` 那行取消注释（macOS 10× 计费，谨慎）。
+  push:
+    # branches: [master, main]     # 默认分支可能是 master 也可能是 main，两个都收
+    tags: ['v*']
   # pull_request:
   #   types: [opened, synchronize, reopened, ready_for_review]
   #   branches: [master, main]
@@ -340,7 +342,8 @@ jobs:
         run: ls -lh dist
 
       - name: 建 Release 并附上产物
-        uses: softprops/action-gh-release@v1
+        # v1 跑在 GitHub 已弃用的 Node 上，现在容易直接失败；v2 是当前主线。
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}

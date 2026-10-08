@@ -3,6 +3,7 @@
 #include <flutter/method_call.h>
 #include <flutter/plugin_registrar.h>
 #include <flutter/standard_method_codec.h>
+#include <flutter_windows.h>
 
 #include <atomic>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "decoder_log.h"
+#include "d3d11_video_presenter.h"
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
@@ -63,6 +65,64 @@ flutter::TextureRegistrar* TextureRegistrarFor(flutter::FlutterEngine* engine) {
     return nullptr;
   }
   return registrar->texture_registrar();
+}
+
+// 宽字符 → UTF-8（适配器名进日志；与 d3d11_video_presenter.cpp 里那份同样的做法，
+// 但只用于日志，不值得为它把两个编译单元耦在一起）。
+std::string Utf8FromWideAdapterName(const wchar_t* text) {
+  if (text == nullptr) {
+    return {};
+  }
+  const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0,
+                                          nullptr, nullptr);
+  if (bytes <= 1) {
+    return {};
+  }
+  std::vector<char> buffer(static_cast<size_t>(bytes), '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, text, -1, buffer.data(), bytes, nullptr,
+                        nullptr);
+  return std::string(buffer.data());
+}
+
+// 问引擎"你渲染用的是哪块 DXGI 适配器"，打包成 LUID 交给解码器。
+//
+// 为什么必须问：GPU 呈现路（共享纹理句柄 → 引擎）只有在**两边同一块适配器**上才可能成功
+// —— 传统 DXGI 共享句柄不能跨适配器打开（tools\run_d3d11_adapter_probe.cmd 实测：
+// 同适配器 3/3、跨适配器 0/6），真机第三次"已发布 67 帧但全黑"就是这个原因
+// （AGENTS.md §12.8）。以前只能按厂商猜核显（`VendorId == 0x8086`），猜错就是黑屏；
+// `FlutterDesktopPluginRegistrarGetGraphicsAdapter` 是引擎自己报的，不需要猜。
+//
+// 拿不到就返回 known=false —— 解码器据此**不启用 GPU 路**（宁可 CPU 忙，也不要黑屏）。
+ws_scrcpy::EngineRenderingAdapter QueryEngineRenderingAdapter(
+    flutter::FlutterEngine* engine) {
+  ws_scrcpy::EngineRenderingAdapter adapter;
+  if (engine == nullptr) {
+    return adapter;
+  }
+  FlutterDesktopPluginRegistrarRef registrar_ref =
+      engine->GetRegistrarForPlugin("ScrcpyVideoDecoder");
+  if (registrar_ref == nullptr) {
+    DebugLog("引擎渲染适配器：拿不到 plugin registrar，按未知处理");
+    return adapter;
+  }
+  IDXGIAdapter* raw_adapter = nullptr;
+  if (!FlutterDesktopPluginRegistrarGetGraphicsAdapter(registrar_ref,
+                                                       &raw_adapter) ||
+      raw_adapter == nullptr) {
+    DebugLog("引擎渲染适配器：FlutterDesktopPluginRegistrarGetGraphicsAdapter 失败");
+    return adapter;
+  }
+  // 引擎把适配器交给我们，引用计数归我们（头文件明写"caller is responsible for
+  // releasing"），所以这里必须自己 Release 一次。
+  DXGI_ADAPTER_DESC description = {};
+  if (SUCCEEDED(raw_adapter->GetDesc(&description))) {
+    adapter.known = true;
+    adapter.luid = ws_scrcpy::PresenterOptions::PackLuid(
+        description.AdapterLuid.LowPart, description.AdapterLuid.HighPart);
+    adapter.name = Utf8FromWideAdapterName(description.Description);
+  }
+  raw_adapter->Release();
+  return adapter;
 }
 
 }  // namespace
@@ -241,8 +301,12 @@ void FlutterWindow::HandleVideoMethodCall(
     // 由解码线程在启动时统一打一条阶段汇总。
     ws_scrcpy::DecoderStartupTimings startup;
     startup.register_channel_ms = channel_register_ms_;
+    // 引擎渲染适配器：GPU 呈现路能不能开就看这一条（见 QueryEngineRenderingAdapter）。
+    const ws_scrcpy::EngineRenderingAdapter engine_adapter =
+        QueryEngineRenderingAdapter(engine);
     video_decoder_ = std::make_unique<ScrcpyVideoDecoder>(texture_registrar,
-                                                          startup);
+                                                          startup,
+                                                          engine_adapter);
     const int64_t texture_id = video_decoder_->Start();
     startup.register_texture_ms = NowMs() - create_begin_ms;
     if (texture_id < 0) {
